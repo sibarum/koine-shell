@@ -1,0 +1,17 @@
+(module Process)
+  (record Process)
+    (id Number)
+    (log String)
+  (def start (exe: String, log: String) : Process)
+    (native Windows)
+      | $p = Start-Process -FilePath $exe -PassThru -NoNewWindow -RedirectStandardOutput $log -RedirectStandardError "$log.err"
+      | return [pscustomobject]@{ id = [long]$p.Id; log = $log }
+    (native Linux Mac)
+      | "$exe" >"$log" 2>"$log.err" &
+      | reply_id=$!
+      | reply_log=$log
+  (def running (process: Process) : Bool)
+    (native Windows)
+      | return $null -ne (Get-Process -Id $process.id -ErrorAction SilentlyContinue)
+    (native Linux Mac)
+      | kill -0 "$process_id" 2>/dev/null

@@ -1,0 +1,191 @@
+package sibarum.koine.lang;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+class ParserTest {
+
+    // ---- the examples in docs/language.md -----------------------------------------------------------------------
+
+    /** Each example parses to the tree in {@code expected/}, which was read through once by hand. */
+    @ParameterizedTest
+    @ValueSource(strings = {"preflight", "Python", "Clock", "Process"})
+    void theExamplesParse(String name) {
+        SourceFile file = Parser.parse(name + ".koine", resource("examples/" + name + ".koine"));
+        assertEquals(resource("expected/" + name + ".sexp"), SyntaxPrinter.print(file));
+    }
+
+    // ---- literal commands ---------------------------------------------------------------------------------------
+
+    @Test
+    void anInsertIsOneWordAndJoinsTheTextBesideIt() {
+        assertEquals("(cmd [git] [-C] [{checkout}] [rev-parse] [HEAD])", expr("`git -C {checkout} rev-parse HEAD`"));
+        assertEquals("(cmd [cp] [{a} .bak] [--log= {(. x log)}])", expr("`cp {a}.bak --log={x.log}`"));
+    }
+
+    @Test
+    void quotesGroupWordsAndExpandNothing() {
+        assertEquals("(cmd [jq] ['.a | .b'] [\"{x}\"])", expr("`jq '.a | .b' \"{x}\"`"));
+        assertEquals("(cmd [echo] [\"it's\"] ['say \"hi\"'])", expr("`echo \"it's\" 'say \"hi\"'`"));
+    }
+
+    @Test
+    void twoCharactersBeforeTheBackticksChooseTheBrackets() {
+        assertEquals("(cmd <> [jq] [-r] ['.members[] | {name: .config}'] [{suiteFile}])",
+                expr("<>`jq -r '.members[] | {name: .config}' <suiteFile>`"));
+        assertEquals("(cmd () [x] [{a}] [{}])", expr("()`x (a) {}`"));
+    }
+
+    @Test
+    void aLongerRunOfBackticksLetsACommandHoldShorterOnes() {
+        assertEquals("(cmd [powershell] [-Command] [\"Write-Host `\"])",
+                expr("``powershell -Command \"Write-Host `\"``"));
+        assertEquals("(cmd [a`b] [c```d])", expr("``a`b c```d``"));
+    }
+
+    @Test
+    void aCommandIsAStatementAValueOrACondition() {
+        assertEquals("(run (cmd [build.cmd]))\n", statement("`build.cmd`"));
+        assertEquals("(let head (cmd [git] [rev-parse] [HEAD]))\n", statement("let head = `git rev-parse HEAD`"));
+        assertEquals("(try (cmd [git] [status]))\n", statement("try `git status`"));
+        assertEquals("(not (try? (cmd [{python}] [--check])))", expr("not try `{python} --check`"));
+    }
+
+    // ---- strings ------------------------------------------------------------------------------------------------
+
+    @Test
+    void stringsInsertValuesAndAnInsertCanHoldEitherQuote() {
+        assertEquals("\"{(. app name)} is up\"", expr("\"{app.name} is up\""));
+        assertEquals("\"built: {(call (. apps join) ', ')}\"", expr("\"built: {apps.join(', ')}\""));
+        assertEquals("\"a {(call f \"b\")} c\"", expr("\"a {f(\"b\")} c\""));
+        assertEquals("'^[[:space:]]*(#|$)'", expr("'^[[:space:]]*(#|$)'"));
+    }
+
+    // ---- expressions --------------------------------------------------------------------------------------------
+
+    @Test
+    void notBindsLooserThanComparisonAndAndLooserStill() {
+        assertEquals("(or (and (not (in 'x' line)) (== a b)) c)", expr("not 'x' in line and a == b or c"));
+    }
+
+    @Test
+    void asBindsLooserThanMembers() {
+        assertEquals("(. (as (call (. Json read) m) Manifest) latest)", expr("(Json.read(m) as Manifest).latest"));
+    }
+
+    @Test
+    void recordsAreMadeWithNamedArguments() {
+        assertEquals("(call Binary name: 'app' source: 'app.exe')", expr("Binary(name: 'app', source: 'app.exe')"));
+    }
+
+    @Test
+    void listsAndMapsCanSpanLines() {
+        assertEquals("(let xs ['a' 'b'])\n", statement("let xs = [\n  'a',\n  'b',\n]"));
+        assertEquals("(let m {'a': 1})\n", statement("let m = {'a': 1}"));
+    }
+
+    // ---- blocks -------------------------------------------------------------------------------------------------
+
+    @Test
+    void elseIfChains() {
+        assertEquals("""
+                (script S <OS>)
+                  (if (== a 1))
+                    (print 'one')
+                  (else if (== a 2))
+                    (print 'two')
+                  (else)
+                    (print 'many')
+                """, SyntaxPrinter.print(Parser.parse("s.koine", """
+                script S<OS>
+                  if a == 1
+                    print 'one'
+                  else if a == 2
+                    print 'two'
+                  else
+                    print 'many'
+                """)));
+    }
+
+    @Test
+    void aNativeBodyIsTakenAsItIsUpToWhereTheIndentationEnds() {
+        assertEquals("""
+                (module M)
+                  (def f)
+                    (native Windows)
+                      | if ($x) {
+                      |     # not a comment to Koine
+                      |
+                      |     Write-Host `"q`"
+                      | }
+                    (native Linux Mac bundled)
+                      | echo "{x}"
+                """, SyntaxPrinter.print(Parser.parse("M.koine", """
+                module M
+
+                def f
+                  native Windows
+                    if ($x) {
+                        # not a comment to Koine
+
+                        Write-Host `"q`"
+                    }
+
+                  native Linux, Mac bundled
+                    echo "{x}"
+                """)));
+    }
+
+    // ---- mistakes -----------------------------------------------------------------------------------------------
+
+    @Test
+    void mistakesSayWhereTheyAre() {
+        assertError("s.koine:2:3: the command is not closed: it needs `` on this line",
+                "script S<OS>\n  ``echo `\n");
+        assertError("s.koine:2:9: the quote is not closed: it needs a ' before the command ends",
+                "script S<OS>\n  `echo 'a b`\n");
+        assertError("s.koine:2:8: names cannot contain _", "script S<OS>\n  let a_b = 1\n");
+        assertError("s.koine:3:3: else without an if before it", "script S<OS>\n  print 1\n  else\n    print 2\n");
+        assertError("s.koine:2:3: native goes directly in a def's body", "script S<OS>\n  native Windows\n    x\n");
+        assertError("s.koine:3:3: native Windows has no body", "module M\ndef f\n  native Windows\n");
+        assertError("s.koine:2:3: only a name, or an item such as map[key], can be assigned",
+                "script S<OS>\n  a.b = 1\n");
+        assertError("s.koine:3:3: this line's indentation matches no block it could be in",
+                "script S<OS>\n    print 1\n  print 2\n");
+        assertError("s.koine:2:12: comparisons do not chain; join them with and", "script S<OS>\n  if a < b < c\n    x\n");
+        assertError("s.koine:2:1: a module holds only def and record", "module M\nlet x = 1\n");
+    }
+
+    // ---- helpers ------------------------------------------------------------------------------------------------
+
+    private static String expr(String text) {
+        SourceFile.Script s = (SourceFile.Script) Parser.parse("e.koine", "script E<OS>\n  print " + text + "\n");
+        return SyntaxPrinter.print(((Statement.Print) s.body().getFirst()).message());
+    }
+
+    private static String statement(String text) {
+        SourceFile.Script s = (SourceFile.Script) Parser.parse("e.koine", "script E<OS>\n  " + text + "\n");
+        return SyntaxPrinter.print(s.body().getFirst());
+    }
+
+    private static void assertError(String message, String text) {
+        assertEquals(message, assertThrows(KoineException.class, () -> Parser.parse("s.koine", text)).getMessage());
+    }
+
+    private static String resource(String path) {
+        try (InputStream in = ParserTest.class.getResourceAsStream("/" + path)) {
+            if (in == null) throw new IllegalArgumentException("no resource " + path);
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8).replace("\r\n", "\n");
+        } catch (IOException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+}

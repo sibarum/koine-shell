@@ -1,0 +1,7 @@
+module Python
+
+def find: String
+  for candidate in ['python', 'py', Path.join(Home.directory, 'anaconda3', 'python.exe')]
+    if try `{candidate} --version`
+      return candidate
+  return ''

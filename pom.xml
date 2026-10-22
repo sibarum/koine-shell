@@ -13,8 +13,10 @@
     <description>One script, written once, lowered to PowerShell, Bash and Zsh. koine-ir is the portable IR; the
         three shell IRs are records that map one-to-one onto their shell's syntax.</description>
 
-    <!-- The shell IRs are leaves; koine-ir lowers to each of them, so it builds last. -->
+    <!-- The shell IRs are leaves; koine-ir lowers to each of them, so it builds after them. koine-lang, the language's
+         front end, depends on nothing yet. -->
     <modules>
+        <module>koine-lang</module>
         <module>koine-ir-ps</module>
         <module>koine-ir-bash</module>
         <module>koine-ir-zsh</module>

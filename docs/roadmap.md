@@ -29,7 +29,9 @@ the native code. The first use is deployment and installer scripts; a REPL comes
    - Cleanup that runs even on failure. `within` already promises it.
    - Capturing output without failing, and ending early with success (open questions 5 and 6).
    - Declaring the OSes a script supports, and marking it as a bootstrap script (open question 7).
-2. **A parser and checker** for the language, with preflight as the first test.
+2. **A parser and checker** for the language, with preflight as the first test. *The parser is done:*
+   `koine-lang` reads scripts and modules into a syntax tree, and parses preflight and the `Python`, `Clock` and
+   `Process` examples. The checker is next.
 3. **Settle the IR.** Map preflight onto the portable IR in `koine-ir`, keep what it uses, and add or drop the rest.
    Nodes that the language makes library members (`Print` with a colour, `Pause`, `ScriptPath`, `ReadJson`, `Field`,
    `Spawn`, `IsInteractive` and the like) move into native-tier modules, and their per-shell code with them.
