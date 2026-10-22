@@ -126,7 +126,7 @@ program's syntax, so in Koine choosing the delimiters is the norm, not an edge c
 
 A module member hides how a job is done on each OS, the way Watir's `button.click` hid the browser driver. A script
 mostly calls members, and uses a literal command only where no member exists yet; those places show which members are
-worth adding.
+worth adding. How a module is written is under [Modules](#modules).
 
 Members work on the current directory, so `within` is how a script points them at something:
 
@@ -145,7 +145,7 @@ within repoDirectory
 def latestPublished(manifest)
   if not File.exists(manifest)
     return ''
-  return Json.read(manifest).latest
+  return (Json.read(manifest) as Manifest).latest
 ```
 
 It is called like a member: `latestPublished(manifest)`, and one that takes no arguments has no parentheses.
@@ -172,11 +172,194 @@ does not capture becomes part of its result. These rules make functions safe on 
 3. **Arguments are values, and every variable is local.** Bash functions can see their caller's local variables. The
    compiler makes every `let` inside a function local, so a function cannot change anything it was not passed.
 4. **`fail` inside a function stops the whole script.** Rule 1 guarantees it: nothing runs in a subshell.
-5. **A result is a string, a number, a boolean or a list.** Structured results such as `repo.branch.name` come only
-   from library modules, until records are designed (see open question 1).
+5. **A result is a string, a number, a boolean, a list or a record.** A map stays inside the function that builds it.
+   See [Records](#records).
 
 A function is defined at the script's top level, and can be called before the line that defines it: the compiler
 moves every definition to the top of the output.
+
+## Modules
+
+*Proposed. This answers open question 1.*
+
+A module is a Koine file of `def`s. A member is written in Koine where Koine can express it, using `on` and backticks
+where the OS matters. Where it cannot, the member has a **native body** for each OS, written in that shell's own
+language. There is one parser and one checker for scripts and modules alike, and only the members a script uses
+(and the members they use) are emitted.
+
+```
+module Python
+
+def find: String
+  for candidate in ['python', 'py', Path.join(Home.directory, 'anaconda3', 'python.exe')]
+    if try `{candidate} --version`
+      return candidate
+  return ''
+```
+
+```
+module Clock
+
+def sleep(seconds: Number)
+  native Windows
+    Start-Sleep -Seconds $seconds
+  native Linux, Mac
+    sleep "$seconds"
+```
+
+### Files and names
+
+- A module is a file named after it, `Python.koine`, starting with `module Python`. The standard library ships with the
+  compiler. A script finds a module there first, then next to itself, so scripts in one folder can share a module.
+  That is also how functions are shared between scripts (open question 2).
+- There are no imports. A capitalised name is a module.
+- A module can declare records (see [Records](#records)). A record named after its module, such as `Process` in
+  `Process`, is that module's main type.
+
+### Signatures
+
+Every member declares its parameter types and its result type: `def start(exe: String, log: String): Process`. A
+member with no result leaves the result out. The types are `String`, `Number` (a whole number), `Bool`, lists such as
+`[String]`, and records. A script's own `def`s may leave the types out, as they do now; a module is a contract, so its
+members may not.
+
+### Tiers
+
+A module is native tier unless its header says otherwise: `module Rg bundled`. One member of a native module can be
+raised on its own: `bundled def search(…)`. The checker enforces both rules:
+
+- A native member cannot use a bundled one.
+- A bootstrap script cannot use a bundled member, directly or through other members.
+
+### Native bodies
+
+`native` takes the same OS list as `on`. A member's body is either Koine, or a set of branches by OS, each of which is
+`on` (Koine) or `native` (shell). Every OS the script is compiled for must be covered, or the compiler says which one
+is missing: `Clock.sleep has no Linux body`.
+
+A native body is raw text. It ends where the indentation does, and nothing in it is interpreted, so it needs no
+delimiters and no escaping. The compiler copies it into the function it generates, and does not check it, quote it
+or put `$null =` in front of its lines. Writing it correctly for its shell is the module author's job, and the [target
+notes](targets.md) are the checklist.
+
+What a native body can rely on:
+
+| | PowerShell | Bash, Zsh |
+|---|---|---|
+| Parameters | `$name`, typed: `[string]`, `[long]`, `[bool]`, `[string[]]`, or the record's object | Locals named after the parameters, unpacked by a prologue the compiler writes. Lists are arrays; a record parameter `p` is one local per field, `p_id`, `p_log`. |
+| A `String`, `Number` or list result | `return $value`, `return ,$list` | Set `REPLY`, or the array `reply` |
+| A `Bool` result | `return $true` | The exit status: 0 for true |
+| A record result | `return [pscustomobject]@{ … }` | Set `reply_<field>` for each field, `reply_branch_name` for a nested one |
+| Failing | `koine_fail 'message'` | `koine_fail 'message'` |
+
+`koine_fail` prints the message in red, runs any cleanup and exits non-zero, as `fail` does. The compiler emits it in
+every output that needs it. Koine names cannot contain `_`, so the flattened names never collide.
+
+A record and the members that work on it:
+
+```
+module Process
+
+record Process
+  id: Number
+  log: String
+
+def start(exe: String, log: String): Process
+  native Windows
+    $p = Start-Process -FilePath $exe -PassThru -NoNewWindow -RedirectStandardOutput $log -RedirectStandardError "$log.err"
+    return [pscustomobject]@{ id = [long]$p.Id; log = $log }
+  native Linux, Mac
+    "$exe" >"$log" 2>"$log.err" &
+    reply_id=$!
+    reply_log=$log
+
+def running(process: Process): Bool
+  native Windows
+    return $null -ne (Get-Process -Id $process.id -ErrorAction SilentlyContinue)
+  native Linux, Mac
+    kill -0 "$process_id" 2>/dev/null
+```
+
+`process.running` is `Process.running(process)`: a member written after a value is looked up in the module that
+declares the value's record. The members of strings, lists and maps (`.endsWith`, `.take`, `.words`, `.join`,
+`.isEmpty`, `.keys`, `.has`, `.matches`) are written the same way, in the built-in modules `String`, `List` and `Map`.
+Members that change a value in place, such as `list.add(x)` and `map[key] = x`, are built into the compiler instead,
+because a function cannot change what it was passed (rule 3).
+
+## Records
+
+*Proposed. Records are what `Json.read` and members such as `Process.start` need.*
+
+A record is a named set of typed fields, declared at the top level of a script or a module:
+
+```
+record Binary
+  name: String
+  source: String
+```
+
+- **Fields are read with `.`**, and the checker knows every field, so a misspelled one is a compile error.
+- **A field marked `?` may be missing:** `linux: Platform?`. A missing field reads as the empty value of its type:
+  `''`, `0`, `false`, `[]`, or an empty record, and `.isEmpty` is true for each. A field without `?` is always
+  present.
+- **A record is made by naming its fields:** `Binary(name: 'app', source: 'app.exe')`. A Koine-bodied member that
+  returns a record makes it this way.
+- **Records are values.** Assigning or passing one copies it, and its fields cannot be changed in place.
+- **A record can be a function's result**, which widens rule 5. A map still cannot.
+
+How each shell holds one:
+
+- **PowerShell:** a `[pscustomobject]`.
+- **Bash and Zsh:** no structure at all. A record variable `repo` becomes one variable per field (`repo_branch_name`),
+  and a list field one array. Every field is known when compiling, so the compiler can always name them all: to
+  copy a record, to pass it as an argument, or to receive one through `reply_…`. A list of records becomes one array
+  per field, side by side (`binaries_name`, `binaries_source`). A list of records that themselves hold lists does not
+  fit in arrays, so for now it is a compile error on Bash and Zsh. Preflight never needs one: it reads each `App` on
+  its own.
+
+## Reading JSON
+
+*Proposed. `Json.read` gives a record, not a dynamic JSON value.*
+
+`Json.read` takes the record type to read as, with `as`:
+
+```
+let app = Json.read(config) as App
+```
+
+Without `as` it is a compile error. A top-level list is read as a list type: `Json.read(path) as [Binary]`. Only the
+declared fields are read; others are ignored. A field without `?` that is missing, or a value of the wrong type, fails
+the script with the file and the field: `apps/x/app.json: no field version`.
+
+**Why records, not a dynamic value.** A dynamic value has to be carried as JSON text, and every field read has to parse
+it again. That is what the current IR does on Bash and Zsh, through `jq`. With records, the compiler knows when it
+compiles exactly which paths a script reads, so the file is parsed once and the fields land in ordinary variables.
+
+### What it needs on each OS
+
+`Json.read` must be native tier: installers use it, and they run before the bundle is installed.
+
+- **Windows:** `ConvertFrom-Json`, then a check of the declared fields. Watch two traps in 5.1: a top-level array
+  arrives as one object, and an empty array as `$null`, so lists are wrapped in `@(…)`.
+- **Linux and Mac: not `jq`.** No Linux distribution ships `jq` in every install, and macOS has only had it since 15
+  (Sequoia). Python is not guaranteed either. `awk` is: every Linux has one (gawk, mawk or BusyBox), and so does
+  macOS (BWK awk). So `Json.read` uses one small JSON reader written in POSIX awk, emitted once per script. It turns a
+  file into `path<TAB>value` lines, and the generated code reads the declared paths from them into the record's
+  variables.
+
+What the awk reader needs:
+
+- Only features common to all four awks: no gawk extensions, no `length(array)` assumptions, no regex intervals.
+- Strings with `\"`, `\\`, `\/`, `\n`, `\t` and `\uXXXX`, the last encoded to UTF-8 bytes by arithmetic, since
+  `sprintf("%c")` is not portable above 127. Surrogate pairs can come later.
+- Paths that cannot be confused with values: list items by index, and keys that contain `.` or a tab kept intact.
+- Numbers checked against `Number`: a whole number is accepted, a fraction or exponent fails the read.
+- `null` read as missing.
+- A clear error with the file name for malformed JSON, not empty fields.
+
+**What changes in the IR:** `ReadJson` and `Field` in `koine-ir` lower to `jq` on Bash and Zsh, so they break the
+native tier. They are replaced by `Json.read` in the `Json` module, with the awk reader as its native body on Linux and
+Mac.
 
 ## Example: preflight
 
@@ -197,7 +380,8 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
   Dir.create(logs)
 
   let configs = []
-  for member in Json.read(Path.join(dist, 'installer-suite.json')).members
+  let suite = Json.read(Path.join(dist, 'installer-suite.json')) as Suite
+  for member in suite.members
     configs.add(Path.full(Path.join(dist, member.config)))
 
   if not skipBuild
@@ -215,7 +399,7 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
   step Start
     let dead = []
     for config in configs
-      let app = Json.read(config)
+      let app = Json.read(config) as App
       for binary in app.windows.binaries
         if binary.source.endsWith('.exe')
           let exe = Path.join(Path.parent(config), binary.source)
@@ -241,7 +425,7 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
   step Linux
     let linuxApps = []
     for config in configs
-      let app = Json.read(config)
+      let app = Json.read(config) as App
       if not app.linux.isEmpty
         linuxApps.add(app.name)
 
@@ -272,11 +456,11 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
   else
     step Versions
       for config in configs
-        let app = Json.read(config)
+        let app = Json.read(config) as App
         let manifest = Path.join(dist, 'apps', app.id, 'manifest.json')
         let latest = ''
         if File.exists(manifest)
-          latest = Json.read(manifest).latest
+          latest = (Json.read(manifest) as Manifest).latest
         if latest == app.version
           Console.warn("  {app.name} {app.version} is already published; bump it in {config} if it changed")
         else if latest.isEmpty
@@ -318,7 +502,7 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
       if head != builtFrom[repo]
         problems.add("{repo}: the Linux build is of {builtFrom[repo].take(9)}, the checkout is at {head.take(9)}")
     for config in configs
-      let app = Json.read(config)
+      let app = Json.read(config) as App
       if not app.linux.isEmpty
         let repo = Path.name(Path.parent(config))
         if not builtFrom.has(repo)
@@ -327,6 +511,30 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
           if not File.exists(Path.join(Path.parent(config), binary.source))
             problems.add("{app.id}: no {binary.source}")
     return problems
+
+  # The fields of the JSON files this script reads; the files may hold more.
+  record Suite
+    members: [Member]
+
+  record Member
+    config: String
+
+  record App
+    id: String
+    name: String
+    version: String
+    windows: Platform
+    linux: Platform?
+
+  record Platform
+    binaries: [Binary]
+
+  record Binary
+    name: String
+    source: String
+
+  record Manifest
+    latest: String
 ```
 
 ### What the example shows
@@ -345,28 +553,20 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
 - **The Linux check is a `def`,** as it was a function in the original, called once and again after each rebuild. It
   is defined at the end, so the story reads first and the detail comes after. Its result is a list of strings, which
   rule 5 allows; the map it builds stays inside it.
+- **Every JSON file is read as a record,** declared at the end next to the function. `app.linux` is marked `?` because
+  not every application has a Linux section, and `app.linux.isEmpty` tests for it.
 
 ## Open questions
 
-1. **How a library module is written.** A member needs one implementation per OS and a declared shape for what it
-   returns (`repo.branch.name`, `process.running`). This is the most important question left. One answer is a file per
-   OS, written in that shell's own language, plus a shared declaration of the members and their results. Another,
-   now that there are functions: a module is a Koine file of `def`s, using `on` and backticks where the OS matters,
-   with native code only for members Koine cannot express:
-
-   ```
-   module Python
-     def find
-       for candidate in ['python', 'py', Path.join(Home.directory, 'anaconda3', 'python.exe')]
-         if try `{candidate} --version`
-           return candidate
-       return ''
-   ```
-
-   Members that return records, such as `Git.getRepoDetails`, would still need records to be designed.
-2. **Functions: proposed.** `def` and `return`, with the rules under [Functions](#functions). What is still open:
-   whether a function can return a record or a map, and whether a function can be shared between scripts other than
-   through a module.
+1. **How a library module is written: proposed** under [Modules](#modules), with [Records](#records) and [Reading
+   JSON](#reading-json). Still open:
+   - Whether native bodies get checked, for example by running ShellCheck and PSScriptAnalyzer on the generated
+     functions in the module tests.
+   - Whether `Number` needs fractions. Nothing in preflight does.
+   - Lists of records that hold lists, on Bash and Zsh.
+2. **Functions: proposed.** `def` and `return`, with the rules under [Functions](#functions). A function can now
+   return a record, and functions are shared between scripts as a module next to them. What is still open: whether a
+   function can return a map.
 3. **Plumbing.** Pipes and redirects are not allowed inside backticks. Writing output to a file will eventually need a
    keyword or a library member.
 4. **What happens to the portable IR.** It could become this language's target, or be replaced by something much

@@ -22,7 +22,8 @@ the native code. The first use is deployment and installer scripts; a REPL comes
 
 1. **Settle what blocks installers,** in [language.md](language.md):
    - How a module is written, and how a member declares its tier (open question 1). Everything else rests on this.
-   - What `Json.read` returns: records, or a dynamic JSON value.
+     *Proposed:* Koine `def`s with per-OS `native` bodies, a tier in the module header, and records.
+   - What `Json.read` returns. *Proposed:* a declared record, read on Linux and Mac by a POSIX awk reader, not `jq`.
    - Cleanup that runs even on failure. `within` already promises it.
    - Capturing output without failing, and ending early with success (open questions 5 and 6).
    - Declaring the OSes a script supports, and marking it as a bootstrap script (open question 7).
