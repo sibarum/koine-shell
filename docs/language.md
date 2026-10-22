@@ -226,7 +226,8 @@ members may not.
 ### Tiers
 
 A module is native tier unless its header says otherwise: `module Rg bundled`. One member of a native module can be
-raised on its own: `bundled def search(…)`. The checker enforces both rules:
+raised on its own: `bundled def search(…)`, and so can one OS's branch of a member: `native Linux, Mac bundled`, as
+`Json.read` is (see [Reading and writing data](#reading-and-writing-data)). The checker enforces both rules, per OS:
 
 - A native member cannot use a bundled one.
 - A bootstrap script cannot use a bundled member, directly or through other members.
@@ -288,7 +289,7 @@ because a function cannot change what it was passed (rule 3).
 
 ## Records
 
-*Proposed. Records are what `Json.read` and members such as `Process.start` need.*
+*Proposed. Records are what reading data and members such as `Process.start` need.*
 
 A record is a named set of typed fields, declared at the top level of a script or a module:
 
@@ -314,52 +315,67 @@ How each shell holds one:
   and a list field one array. Every field is known when compiling, so the compiler can always name them all: to
   copy a record, to pass it as an argument, or to receive one through `reply_…`. A list of records becomes one array
   per field, side by side (`binaries_name`, `binaries_source`). A list of records that themselves hold lists does not
-  fit in arrays, so for now it is a compile error on Bash and Zsh. Preflight never needs one: it reads each `App` on
-  its own.
+  fit in arrays, so for now it is a compile error on Bash and Zsh. Nanobuf files never need one, and preflight reads
+  each `App` on its own.
 
-## Reading JSON
+## Reading and writing data
 
-*Proposed. `Json.read` gives a record, not a dynamic JSON value.*
+*Proposed. Koine's own data is [nanobuf](nanobuf.md); JSON is read only where another program owns the file.*
 
-`Json.read` takes the record type to read as, with `as`:
+A script's data goes through two modules, and both read into a declared record, with `as`:
 
 ```
+let manifest = Nanobuf.read(manifestFile) as Manifest
+Nanobuf.write(stateFile, record)
 let app = Json.read(config) as App
+Json.write(registryFile, entry)
 ```
 
-Without `as` it is a compile error. A top-level list is read as a list type: `Json.read(path) as [Binary]`. Only the
-declared fields are read; others are ignored. A field without `?` that is missing, or a value of the wrong type, fails
-the script with the file and the field: `apps/x/app.json: no field version`.
+Without `as`, a read is a compile error. Only the declared fields are read. A missing field without `?`, or a value
+of the wrong type, fails the script with the file and the field: `apps/x/app.json: no field version`.
 
-**Why records, not a dynamic value.** A dynamic value has to be carried as JSON text, and every field read has to parse
-it again. That is what the current IR does on Bash and Zsh, through `jq`. With records, the compiler knows when it
-compiles exactly which paths a script reads, so the file is parsed once and the fields land in ordinary variables.
+**Why records, not a dynamic value.** A dynamic value has to be carried as text, and every field read has to parse it
+again. That is what the current IR does on Bash and Zsh, through `jq`. With records, the compiler knows when it
+compiles exactly which fields a script reads, so the file is parsed once and the fields land in ordinary variables.
 
-### What it needs on each OS
+### Nanobuf: the default
 
-`Json.read` must be native tier: installers use it, and they run before the bundle is installed.
+Files that only Koine scripts and your own components read and write are nanobuf: install records, manifests the
+installers fetch, journals, build stamps. Its reader and writer are a few lines of each shell's built-in commands, so
+`Nanobuf.read` and `Nanobuf.write` are native tier on every OS, and installers can use them.
 
-- **Windows:** `ConvertFrom-Json`, then a check of the declared fields. Watch two traps in 5.1: a top-level array
-  arrives as one object, and an empty array as `$null`, so lists are wrapped in `@(…)`.
-- **Linux and Mac: not `jq`.** No Linux distribution ships `jq` in every install, and macOS has only had it since 15
-  (Sequoia). Python is not guaranteed either. `awk` is: every Linux has one (gawk, mawk or BusyBox), and so does
-  macOS (BWK awk). So `Json.read` uses one small JSON reader written in POSIX awk, emitted once per script. It turns a
-  file into `path<TAB>value` lines, and the generated code reads the declared paths from them into the record's
-  variables.
+A nanobuf file is read as a record whose fields are its kinds:
 
-What the awk reader needs:
+```
+record Manifest
+  app: App
+  versions: [Version]
+  files: [File]
+```
 
-- Only features common to all four awks: no gawk extensions, no `length(array)` assumptions, no regex intervals.
-- Strings with `\"`, `\\`, `\/`, `\n`, `\t` and `\uXXXX`, the last encoded to UTF-8 bytes by arithmetic, since
-  `sprintf("%c")` is not portable above 127. Surrogate pairs can come later.
-- Paths that cannot be confused with values: list items by index, and keys that contain `.` or a tab kept intact.
-- Numbers checked against `Number`: a whole number is accepted, a fraction or exponent fails the read.
-- `null` read as missing.
-- A clear error with the file name for malformed JSON, not empty fields.
+- A field that is a record is a kind with exactly one row, or at most one when it is marked `?`.
+- A field that is a list is a kind with any number of rows.
+- The records of the rows hold only strings, numbers and booleans. Nesting is by key, as in the format itself.
 
-**What changes in the IR:** `ReadJson` and `Field` in `koine-ir` lower to `jq` on Bash and Zsh, so they break the
-native tier. They are replaced by `Json.read` in the `Json` module, with the awk reader as its native body on Linux and
-Mac.
+That fits how Bash and Zsh hold records: a list of flat records is one array per field, side by side.
+
+### JSON: only for other programs' files
+
+Some files are JSON because something else reads or writes them. The install registry, `<id>.json`, is read by the
+applications themselves (`Apps.java` in `vexelray-framework-shell`, `Install` and `Updates` in `vex-suite-common`).
+`installer.json` and `installer-suite.json` are read by the installer generator.
+
+- **`Json.write` is native tier on every OS.** The compiler knows every field, so writing is printing, with strings
+  escaped for JSON (`"`, `\` and control characters). The Linux installer template already writes the registry this
+  way, from its `.state` record.
+- **`Json.read` is native on Windows, bundled on Linux and Mac.** Windows has `ConvertFrom-Json`. Watch two traps in
+  5.1: a top-level array arrives as one object, and an empty array as `$null`, so lists are wrapped in `@(…)`. Linux
+  and Mac use `jq` from the bundle: no Linux distribution ships `jq` in every install, and macOS has had it only since
+  15 (Sequoia). An installer that needs to read something on Linux or Mac reads nanobuf, as the Linux installer
+  already reads `manifest.linux.txt` instead of `manifest.json`.
+
+**What changes in the IR:** `ReadJson` and `Field` in `koine-ir` lower to `jq` on Bash and Zsh, which is not native.
+They are replaced by `Json.read` in the `Json` module, bundled on those two shells.
 
 ## Example: preflight
 
@@ -554,12 +570,13 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
   is defined at the end, so the story reads first and the detail comes after. Its result is a list of strings, which
   rule 5 allows; the map it builds stays inside it.
 - **Every JSON file is read as a record,** declared at the end next to the function. `app.linux` is marked `?` because
-  not every application has a Linux section, and `app.linux.isEmpty` tests for it.
+  not every application has a Linux section, and `app.linux.isEmpty` tests for it. These files stay JSON because the
+  installer generator reads them, and preflight runs only on Windows, where `Json.read` is native.
 
 ## Open questions
 
 1. **How a library module is written: proposed** under [Modules](#modules), with [Records](#records) and [Reading
-   JSON](#reading-json). Still open:
+   and writing data](#reading-and-writing-data). Still open:
    - Whether native bodies get checked, for example by running ShellCheck and PSScriptAnalyzer on the generated
      functions in the module tests.
    - Whether `Number` needs fractions. Nothing in preflight does.

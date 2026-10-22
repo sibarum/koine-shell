@@ -23,7 +23,8 @@ the native code. The first use is deployment and installer scripts; a REPL comes
 1. **Settle what blocks installers,** in [language.md](language.md):
    - How a module is written, and how a member declares its tier (open question 1). Everything else rests on this.
      *Proposed:* Koine `def`s with per-OS `native` bodies, a tier in the module header, and records.
-   - What `Json.read` returns. *Proposed:* a declared record, read on Linux and Mac by a POSIX awk reader, not `jq`.
+   - What reading data returns. *Proposed:* a declared record. Koine's own files are [nanobuf](nanobuf.md), native
+     on every OS; `Json.read` is native only on Windows, and `Json.write` everywhere, for files other programs own.
    - Cleanup that runs even on failure. `within` already promises it.
    - Capturing output without failing, and ending early with success (open questions 5 and 6).
    - Declaring the OSes a script supports, and marking it as a bootstrap script (open question 7).
@@ -32,7 +33,7 @@ the native code. The first use is deployment and installer scripts; a REPL comes
    Nodes that the language makes library members (`Print` with a colour, `Pause`, `ScriptPath`, `ReadJson`, `Field`,
    `Spawn`, `IsInteractive` and the like) move into native-tier modules, and their per-shell code with them.
 4. **The native-tier modules preflight needs:** `Path`, `File`, `Dir`, `Json`, `Process`, `Console`, `Script`,
-   `Python`.
+   `Python`. The installer will add `Nanobuf`.
 5. **Compile preflight for all three shells.** Compare against the expected outputs in the tests and the original
    `preflight.ps1`, then run it for real.
 6. **Port a real installer as a bootstrap script.** This is the milestone.
