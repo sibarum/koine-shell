@@ -320,7 +320,8 @@ How each shell holds one:
 
 ## Reading and writing data
 
-*Proposed. Koine's own data is [nanobuf](nanobuf.md); JSON is read only where another program owns the file.*
+*Proposed. Koine's own data is [nanobuf](https://github.com/sibarum/intrabuf/blob/develop/docs/nanobuf.md), specified
+in the intrabuf repository; JSON is read only where another program owns the file.*
 
 A script's data goes through two modules, and both read into a declared record, with `as`:
 

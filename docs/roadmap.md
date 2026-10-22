@@ -23,8 +23,9 @@ the native code. The first use is deployment and installer scripts; a REPL comes
 1. **Settle what blocks installers,** in [language.md](language.md):
    - How a module is written, and how a member declares its tier (open question 1). Everything else rests on this.
      *Proposed:* Koine `def`s with per-OS `native` bodies, a tier in the module header, and records.
-   - What reading data returns. *Proposed:* a declared record. Koine's own files are [nanobuf](nanobuf.md), native
-     on every OS; `Json.read` is native only on Windows, and `Json.write` everywhere, for files other programs own.
+   - What reading data returns. *Proposed:* a declared record. Koine's own files are
+     [nanobuf](https://github.com/sibarum/intrabuf/blob/develop/docs/nanobuf.md), native on every OS; `Json.read` is
+     native only on Windows, and `Json.write` everywhere, for files other programs own.
    - Cleanup that runs even on failure. `within` already promises it.
    - Capturing output without failing, and ending early with success (open questions 5 and 6).
    - Declaring the OSes a script supports, and marking it as a bootstrap script (open question 7).
