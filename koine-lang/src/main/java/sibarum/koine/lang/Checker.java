@@ -810,13 +810,21 @@ public final class Checker {
             return Prim.ERROR;
         }
 
-        // Built into the compiler: they work on any list, map or record, and add changes its list in place.
+        // Built into the compiler: they work on any list, map or record, add changes its list in place, and matches
+        // needs its pattern when compiling.
         boolean container = t == Prim.STRING || t instanceof Type.ListOf || t instanceof Type.MapOf || t instanceof Type.Rec;
         if (name.equals("isEmpty") && container && arguments.isEmpty()) return Prim.BOOL;
         if (t instanceof Type.MapOf m && name.equals("keys") && arguments.isEmpty()) return new Type.ListOf(m.key());
         if (t instanceof Type.MapOf m && name.equals("has") && arguments.size() == 1) {
             Expr key = arguments.getFirst().value();
             expect(value(key, c), m.key(), key.pos(), "the map's keys are " + Type.describe(m.key()), c);
+            return Prim.BOOL;
+        }
+        // Its pattern is a POSIX ERE, which the compiler translates for PowerShell, so it must be known when compiling.
+        if (t == Prim.STRING && name.equals("matches") && arguments.size() == 1) {
+            Expr pattern = arguments.getFirst().value();
+            if (!(pattern instanceof Expr.Str s && s.parts().stream().allMatch(p -> p instanceof Expr.Str.Text)))
+                problem(u, pattern.pos(), "matches takes its pattern as a string written out, with nothing inserted");
             return Prim.BOOL;
         }
         if (t instanceof Type.ListOf l && name.equals("add") && arguments.size() == 1) {

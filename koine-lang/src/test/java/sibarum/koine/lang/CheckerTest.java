@@ -15,19 +15,33 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class CheckerTest {
 
-    /**
-     * The modules the examples name: the examples themselves, then signature-only stand-ins for the standard library
-     * in {@code signatures/}.
-     */
-    private static final Library LIBRARY = name -> Optional.ofNullable(resource("examples/" + name + ".koine"))
-            .or(() -> Optional.ofNullable(resource("signatures/" + name + ".koine")));
+    private static final Library LIBRARY = StandardLibrary.INSTANCE;
 
-    // ---- the examples in docs/language.md -----------------------------------------------------------------------
+    // ---- the examples in docs/language.md, and the standard library ---------------------------------------------
 
     @ParameterizedTest
     @ValueSource(strings = {"preflight", "Python", "Clock", "Process"})
     void theExamplesCheck(String name) {
         assertEquals(List.of(), problems(name + ".koine", resource("examples/" + name + ".koine")));
+    }
+
+    @Test
+    void theStandardLibraryChecks() {
+        for (String name : StandardLibrary.MODULES)
+            assertEquals(List.of(), problems(name + ".koine", LIBRARY.module(name).orElseThrow()), name);
+    }
+
+    @Test
+    void matchesTakesAPatternWrittenOut() {
+        assertEquals(List.of("s.koine:3:20: matches takes its pattern as a string written out, with nothing inserted"),
+                problems("s.koine", """
+                script S<OS>
+                  let p = '^a'
+                  if 'abc'.matches(p)
+                    print 'yes'
+                  if 'abc'.matches('^a')
+                    print 'yes'
+                """));
     }
 
     /** Changing one thing in preflight is caught, which shows the clean result above is not the checker seeing nothing. */

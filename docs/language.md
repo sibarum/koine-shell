@@ -354,7 +354,7 @@ What a native body can rely on:
 
 | | PowerShell | Bash, Zsh |
 |---|---|---|
-| Parameters | `$name`, typed: `[string]`, `[long]`, `[bool]`, `[string[]]`, or the record's object | Locals named after the parameters, unpacked by a prologue the compiler writes. Lists are arrays; a record parameter `p` is one local per field, `p_id`, `p_log`. |
+| Parameters | `$name`, typed: `[string]`, `[long]`, `[bool]`, `[string[]]`, or the record's object. Avoid PowerShell's automatic variables, such as `$home`, `$input` or `$args`. | Locals named after the parameters, unpacked by a prologue the compiler writes. Lists are arrays (from 1 in Zsh); a `Bool` is 0 or 1; a record parameter `p` is one local per field, `p_id`, `p_log`. Zsh's are `local -h`, so `path` is safe. |
 | A `String`, `Number` or list result | `return $value`, `return ,$list` | Set `REPLY`, or the array `reply` |
 | A `Bool` result | `return $true` | The exit status: 0 for true |
 | A record result | `return [pscustomobject]@{ … }` | Set `reply_<field>` for each field, `reply_branch_name` for a nested one |
@@ -395,14 +395,16 @@ def stop(process: Process)
 ```
 
 `process.running` is `Process.running(process)`: a member written after a value is looked up in the module that
-declares the value's record. The members of strings, numbers and lists (`.endsWith`, `.take`, `.words`, `.matches`,
-`.text`, `.join`) are written the same way, in the built-in modules `String`, `Number` and `List`. A few are built into
-the compiler instead:
+declares the value's record. The members of strings, numbers and lists (`.endsWith`, `.take`, `.words`, `.text`,
+`.join`) are written the same way, in the standard library's `String`, `Number` and `List`. A few are built into the
+compiler instead:
 
 - **Members that change a value in place,** `list.add(x)` and `map[key] = x`, because a function cannot change what
   it was passed (rule 3).
 - **Members that work on any list, map or record,** `.isEmpty` (on strings too), `map.keys` and `map.has(key)`,
   because a module member's parameter has one type, and there is no way to write "a list of anything".
+- **`text.matches(pattern)`,** because its pattern, a POSIX ERE, is translated for PowerShell when compiling. It must
+  be a string written out, with nothing inserted.
 
 A native body is a leaf: it never holds Koine and never calls back into it. Where native code has to come before and
 after some Koine, the member is written in Koine and calls native members for those parts; see the next section.
@@ -460,9 +462,10 @@ compiler expands a member that takes a block where it is called, in the syntax t
 
 This is the one place functions are expanded rather than called. Every other `def` stays a real function.
 
-`within` and `step` are members like this, in the standard library: `within` is a native push of the directory, the
-block, and a native pop under `finally`; `step` announces itself, runs the block, and reports a failure with its name.
-Their keyword spelling is all that is special about them.
+`within` and `step` are members like this, in the standard library. `within dir` is `Dir.runIn(dir)`: a native push of
+the directory, the block, and a native pop under `finally`. `step Build` is `Script.runStep('Build')`: it announces
+itself, runs the block, and leaves its name where `koine_fail` reports it. Their keyword spelling is all that is
+special about them, and keywords cannot be member names, which is why the members are called something else.
 
 ### Cleanup
 

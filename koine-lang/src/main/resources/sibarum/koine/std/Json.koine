@@ -1,0 +1,10 @@
+module Json
+
+# Reading JSON that another program owns. The result is read into a record with as; only the record's fields are read.
+# Windows has ConvertFrom-Json. Linux and Mac have no JSON reader in every install, so they use jq from the bundle, and
+# the data is the document's compact text, which as reads each field from.
+def read(path: String): Data
+  native Windows
+    return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json)
+  native Linux, Mac bundled
+    REPLY=$(jq -c . "$path") || koine_fail "cannot read $path"

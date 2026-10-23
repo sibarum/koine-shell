@@ -1,0 +1,43 @@
+module Console
+
+# Lines in colour, where the output is a terminal. print writes a plain line.
+
+def heading(text: String)
+  native Windows
+    Write-Host "`n== $text" -ForegroundColor Cyan
+  native Linux, Mac
+    if [[ -t 1 ]]; then printf '\n\e[36m== %s\e[0m\n' "$text"; else printf '\n== %s\n' "$text"; fi
+
+def success(message: String)
+  native Windows
+    Write-Host $message -ForegroundColor Green
+  native Linux, Mac
+    if [[ -t 1 ]]; then printf '\e[32m%s\e[0m\n' "$message"; else printf '%s\n' "$message"; fi
+
+def warn(message: String)
+  native Windows
+    Write-Host $message -ForegroundColor Yellow
+  native Linux, Mac
+    if [[ -t 1 ]]; then printf '\e[33m%s\e[0m\n' "$message"; else printf '%s\n' "$message"; fi
+
+def error(message: String)
+  native Windows
+    Write-Host $message -ForegroundColor Red
+  native Linux, Mac
+    if [[ -t 1 ]]; then printf '\e[31m%s\e[0m\n' "$message"; else printf '%s\n' "$message"; fi
+
+# Whether a person can answer a prompt: input from a terminal, and the shell not told it is non-interactive.
+def interactive: Bool
+  native Windows
+    return [Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not ([Environment]::GetCommandLineArgs() -match '^-NonI')
+  native Linux, Mac
+    [[ -t 0 ]]
+
+# Shows the message and waits for Enter.
+def pause(message: String)
+  native Windows
+    $null = Read-Host $message
+  native Linux
+    read -r -p "$message: "
+  native Mac
+    read -r "?$message: "

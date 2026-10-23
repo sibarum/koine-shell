@@ -1,0 +1,40 @@
+module Path
+
+# Paths as text. None of these look at the disk, except full, which resolves against the current directory.
+
+def join(parts: String...): String
+  native Windows
+    $joined = $parts[0]
+    for ($i = 1; $i -lt $parts.Count; $i++) { $joined = Join-Path $joined $parts[$i] }
+    return $joined
+  native Linux, Mac
+    local IFS=/
+    REPLY="${parts[*]}"
+
+# The folder a path is in.
+def parent(path: String): String
+  native Windows
+    return (Split-Path -Path $path -Parent)
+  native Linux
+    REPLY=$(dirname -- "$path")
+  native Mac
+    REPLY=${path:h}
+
+# The last part of a path.
+def name(path: String): String
+  native Windows
+    return (Split-Path -Path $path -Leaf)
+  native Linux
+    REPLY=$(basename -- "$path")
+  native Mac
+    REPLY=${path:t}
+
+# The absolute path, with . and .. resolved; it need not exist. Windows resolves against PowerShell's location, which
+# Push-Location moves and the process's own directory does not.
+def full(path: String): String
+  native Windows
+    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
+  native Linux
+    REPLY=$(realpath -ms -- "$path") || koine_fail "cannot resolve $path"
+  native Mac
+    REPLY=${path:A}

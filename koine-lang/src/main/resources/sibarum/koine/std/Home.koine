@@ -1,0 +1,8 @@
+module Home
+
+# The user's home folder.
+def directory: String
+  native Windows
+    return $HOME
+  native Linux, Mac
+    REPLY=$HOME

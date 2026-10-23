@@ -1,0 +1,31 @@
+module String
+
+# The members of a string: line.words is String.words(line). isEmpty and matches are built into the compiler.
+
+def empty: String
+  native Windows
+    return ''
+  native Linux, Mac
+    REPLY=
+
+def endsWith(text: String, suffix: String): Bool
+  native Windows
+    return $text.EndsWith($suffix, [System.StringComparison]::Ordinal)
+  native Linux, Mac
+    [[ $text == *"$suffix" ]]
+
+# The first count characters, or all of a shorter text.
+def take(text: String, count: Number): String
+  native Windows
+    return $text.Substring(0, [Math]::Min($count, $text.Length))
+  native Linux, Mac
+    REPLY=${text:0:count}
+
+# The text split at runs of whitespace, with none at either end.
+def words(text: String): [String]
+  native Windows
+    return ,@(-split $text)
+  native Linux
+    read -r -d '' -a reply <<< "$text" || true
+  native Mac
+    reply=(${=text})

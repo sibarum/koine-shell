@@ -1,0 +1,18 @@
+module File
+
+# Whether a file or folder is there.
+def exists(path: String): Bool
+  native Windows
+    return (Test-Path -LiteralPath $path)
+  native Linux, Mac
+    [[ -e $path ]]
+
+# A text file's lines, without their line breaks.
+def lines(path: String): [String]
+  native Windows
+    return ,@(Get-Content -LiteralPath $path)
+  native Linux
+    mapfile -t reply < "$path" || koine_fail "cannot read $path"
+  native Mac
+    [[ -r $path ]] || koine_fail "cannot read $path"
+    reply=("${(@f)$(<$path)}")

@@ -1,0 +1,31 @@
+module Dir
+
+# Creates a folder and any parents it needs; one that exists is left as it is.
+def create(path: String)
+  native Windows
+    $null = New-Item -ItemType Directory -Force -Path $path
+  native Linux, Mac
+    mkdir -p -- "$path" || koine_fail "cannot create $path"
+
+# What `within path` means: runs the block in that folder, and goes back afterwards however the block ends.
+def runIn(path: String, body: Block)
+  push(path)
+  body
+  finally
+    pop
+
+def push(path: String)
+  native Windows
+    Push-Location -LiteralPath $path
+  native Linux
+    pushd -- "$path" >/dev/null || koine_fail "no folder $path"
+  native Mac
+    pushd -q -- "$path" || koine_fail "no folder $path"
+
+def pop
+  native Windows
+    Pop-Location
+  native Linux
+    popd >/dev/null
+  native Mac
+    popd -q

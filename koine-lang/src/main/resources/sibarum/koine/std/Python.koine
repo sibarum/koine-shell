@@ -1,0 +1,9 @@
+module Python
+
+# A Python that answers --version: on Windows, the Store's python.exe stub is on the path but runs nothing.
+def find: String
+  let home = Home.directory
+  for candidate in ['python', 'py', Path.join(home, 'anaconda3', 'python.exe'), Path.join(home, 'miniconda3', 'python.exe')]
+    if try {}`{candidate} --version`
+      return candidate
+  return String.empty

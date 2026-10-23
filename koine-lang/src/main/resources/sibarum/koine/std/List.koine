@@ -1,0 +1,14 @@
+module List
+
+# The members of a list: names.join(', ') is List.join(names, ', '). add, isEmpty and indexing are built into the
+# compiler.
+
+def join(items: [String], separator: String): String
+  native Windows
+    return ($items -join $separator)
+  native Linux
+    local item
+    REPLY=${items[0]-}
+    for item in "${items[@]:1}"; do REPLY+=$separator$item; done
+  native Mac
+    REPLY=${(pj:$separator:)items}

@@ -1,0 +1,42 @@
+module Script
+
+# The running script: the folder it is in, its siblings, and the step it is in.
+
+def directory: String
+  native Windows
+    return $PSScriptRoot
+  native Linux
+    REPLY=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd) || koine_fail 'cannot find the script'
+  native Mac
+    REPLY=${${(%):-%x}:A:h}
+
+# A Koine script next to this one, as compiled for this OS: deploy.ps1, deploy.sh or deploy.zsh.
+def sibling(name: String): String
+  native Windows
+    return (Join-Path $PSScriptRoot "$name.ps1")
+  native Linux
+    REPLY=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$name.sh || koine_fail 'cannot find the script'
+  native Mac
+    REPLY=${${(%):-%x}:A:h}/$name.zsh
+
+# What `step Name` means: announces the step, runs it, and leaves its name for a failure inside it to report.
+def runStep(name: String, body: Block)
+  Console.heading(name)
+  let outer = currentStep
+  setStep(name)
+  body
+  finally
+    setStep(outer)
+
+# The step running now, which koine_fail names; empty outside any step.
+def currentStep: String
+  native Windows
+    return [string]$script:KoineStep
+  native Linux, Mac
+    REPLY=${koine_step-}
+
+def setStep(name: String)
+  native Windows
+    $script:KoineStep = $name
+  native Linux, Mac
+    koine_step=$name

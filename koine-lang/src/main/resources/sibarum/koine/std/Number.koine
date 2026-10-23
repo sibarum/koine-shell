@@ -1,0 +1,8 @@
+module Number
+
+# A whole number as text, for inserting into a string or a command.
+def text(number: Number): String
+  native Windows
+    return [string]$number
+  native Linux, Mac
+    REPLY=$number

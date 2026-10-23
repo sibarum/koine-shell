@@ -38,8 +38,8 @@ the native code. The first use is deployment and installer scripts; a REPL comes
 2. **A parser and checker** for the language, with preflight as the first test. *Both are done:* `koine-lang` reads
    scripts and modules into a syntax tree, and `Checker` checks them: names and scopes, types (with a script's untyped
    `def`s taking theirs from their first call), what goes where, that every OS has a body, the two tier rules, and
-   blocks. Preflight and the `Python`, `Clock` and `Process` examples check clean, against signature-only stand-ins for
-   the rest of the standard library in the tests. Not checked yet:
+   blocks. Preflight, the `Python`, `Clock` and `Process` examples and the whole standard library check clean. Not
+   checked yet:
    - that a `def` with a result returns on every path;
    - native bodies, which stay the module author's job (open question 1);
    - `within` and `step` as members of the standard library. The checker still treats them as keywords, which they
@@ -47,11 +47,13 @@ the native code. The first use is deployment and installer scripts; a REPL comes
 
    The checker reports problems only. What the compiler will need from it, each name resolved to its declaration and
    each expression's type, comes with step 3.
-3. **Settle the IR.** Map preflight onto the portable IR in `koine-ir`, keep what it uses, and add or drop the rest.
-   Nodes that the language makes library members (`Print` with a colour, `Pause`, `ScriptPath`, `ReadJson`, `Field`,
-   `Spawn`, `IsInteractive` and the like) move into native-tier modules, and their per-shell code with them.
+3. **Settle the IR.** *Mapped:* [ir.md](ir.md) gives every construct in preflight its node, and every node its fate.
+   The standard library preflight needs exists, with real native bodies for all three shells, and the checker uses it.
+   What remains is changing `koine-ir` and its lowerings to match: native functions, records, `Finally`, `Fail`, and
+   the moved nodes gone.
 4. **The native-tier modules preflight needs:** `Path`, `File`, `Dir`, `Json`, `Process`, `Console`, `Script`,
-   `Python`. The installer will add `Nanobuf`.
+   `Python`. *Written* in `koine-lang/src/main/resources/sibarum/koine/std`, with `Clock`, `Home`, `String`, `Number`
+   and `List`; their native bodies run for the first time in step 5. The installer will add `Nanobuf`.
 5. **Compile preflight for all three shells.** Compare against the expected outputs in the tests and the original
    `preflight.ps1`, then run it for real.
 6. **Port a real installer as a bootstrap script.** This is the milestone.
