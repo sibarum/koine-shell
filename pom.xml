@@ -14,7 +14,7 @@
         three shell IRs are records that map one-to-one onto their shell's syntax.</description>
 
     <!-- The shell IRs are leaves; koine-ir lowers to each of them, so it builds after them. koine-lang, the language's
-         front end, depends on nothing yet. -->
+         front end, depends on nothing; koine-ir's tests take their native functions from its standard library. -->
     <modules>
         <module>koine-lang</module>
         <module>koine-ir-ps</module>

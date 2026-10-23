@@ -121,7 +121,7 @@ public sealed interface PsExpression extends PsPipelineElement, PsCommandElement
         EQ("-eq"), NE("-ne"), GT("-gt"), GE("-ge"), LT("-lt"), LE("-le"),
         LIKE("-like"), NOTLIKE("-notlike"), MATCH("-match"), NOTMATCH("-notmatch"),
         CEQ("-ceq"), CNE("-cne"), CLIKE("-clike"), CMATCH("-cmatch"), CNOTMATCH("-cnotmatch"),
-        CONTAINS("-contains"), NOTCONTAINS("-notcontains"), IN("-in"), NOTIN("-notin"),
+        CONTAINS("-contains"), NOTCONTAINS("-notcontains"), CCONTAINS("-ccontains"), IN("-in"), NOTIN("-notin"),
         AND("-and"), OR("-or"), XOR("-xor"),
         JOIN("-join"), SPLIT("-split"), REPLACE("-replace"), FORMAT("-f"),
         AS("-as"), IS("-is"), ISNOT("-isnot"),

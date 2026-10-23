@@ -1,14 +1,17 @@
 package sibarum.koine.ir.lower;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
 import sibarum.koine.ir.Command;
 import sibarum.koine.ir.Expr;
+import sibarum.koine.ir.OS;
 import sibarum.koine.ir.Script;
 import sibarum.koine.ir.Statement;
 import sibarum.koine.ir.Type;
@@ -37,7 +40,13 @@ import static sibarum.koine.ir.ps.Ps.*;
  *       where a hashtable literal would ignore case.</li>
  *   <li>String comparisons and matches are case-sensitive ({@code -ceq}, {@code -cmatch}); POSIX classes in a pattern
  *       become .NET ones.</li>
- *   <li>A JSON field read as a string, number or boolean is cast, so a missing one reads as empty, 0 or false.</li>
+ *   <li>A record is a {@code [pscustomobject]}. Data read as one goes through a {@code koine_as_<Record>} function,
+ *       written into the scripts that use it, which reads only the record's fields: a missing string, number or bool
+ *       reads as empty, 0 or false, a missing record as {@code $null}, and a list is always an array.</li>
+ *   <li>A native function's body is copied as it is, after a {@code param()} block with each parameter typed.</li>
+ *   <li>{@link Statement.Fail} calls {@code koine_fail}, written into the scripts that use it, native bodies included:
+ *       it prints the message in red, with the step {@code $script:KoineStep} names, and exits with 1.
+ *       {@link Statement.Finally} is {@code try}/{@code finally}, which runs on {@code exit} too.</li>
  *   <li>{@link Expr.Succeeds} calls a {@code Test-Succeeds} function, written into the scripts that use it: under
  *       {@code $ErrorActionPreference = 'Stop'}, Windows PowerShell turns a native program's redirected stderr into
  *       a terminating error, and a program that is not there leaves {@code $LASTEXITCODE} as it was.</li>
@@ -46,11 +55,10 @@ import static sibarum.koine.ir.ps.Ps.*;
  *       nothing and a {@code "} as it is: a literal here, anything else by a {@code ConvertTo-NativeArgument} function
  *       written into the scripts that use it. PowerShell 7.3 and later are set to pass them as 5.1 does. A
  *       {@code .ps1} script, {@code cmd} and batch files read their arguments their own way and get them as they
- *       are. {@link Expr.Spawn}'s are not escaped yet: {@code Start-Process} joins them with spaces.</li>
+ *       are.</li>
  *   <li>A program named like one of Windows PowerShell's aliases, {@code curl}, {@code sort} or {@code where}, is
  *       called with {@code .exe}, as the alias would run a cmdlet instead.</li>
  *   <li>Programs' output is decoded as UTF-8, where Windows PowerShell would use the console's code page.</li>
- *   <li>{@link Expr.FullPath} resolves against PowerShell's location, not the process's directory.</li>
  * </ul>
  */
 public final class PsLowering {
@@ -77,8 +85,11 @@ public final class PsLowering {
     private boolean inFunction;
     private boolean usesTestSucceeds;
     private boolean usesNativeArgument;
+    private boolean usesFail;
     private boolean runsPrograms;
     private boolean readsOutput;
+    /** The records data is read as, each with its {@code koine_as_} function, in the order they are first needed. */
+    private final Map<String, Type.Record> readAs = new LinkedHashMap<>();
     private int temporaries;
 
     private PsLowering() {
@@ -123,6 +134,16 @@ public final class PsLowering {
                     + "\nand a \" as it is, and quotes an argument with a space only where an even number of \" come before it."));
             body.add(convertToNativeArgument());
         }
+        if (usesFail) {
+            body.add(blank());
+            body.add(comment("Fails the script: the message in red, with the step it is in, then exit, which runs every finally."));
+            body.add(koineFail());
+        }
+        if (!readAs.isEmpty()) {
+            body.add(blank());
+            body.add(comment("Data read as a record: only the record's fields, a missing one as empty, and every list an array."));
+            for (Type.Record r : readAs.values()) body.add(readAsFunction(r));
+        }
         body.add(blank());
         body.addAll(main);
         return new PsScript(Optional.of(help(s)),
@@ -142,14 +163,18 @@ public final class PsLowering {
         return String.join("\n", text.lines().map(l -> l.isEmpty() ? "" : "  " + l).toList());
     }
 
+    private static boolean isFunction(Statement s) {
+        return s instanceof Statement.Function || s instanceof Statement.NativeFunction;
+    }
+
     /** The script's own statements, with a blank line before each function and each comment that starts a part. */
     private List<PsStatement> topLevel(List<Statement> statements) {
         List<PsStatement> out = new ArrayList<>();
         Statement previous = null;
         for (Statement s : statements) {
-            boolean opensPart = s instanceof Statement.Function && !(previous instanceof Statement.Comment)
+            boolean opensPart = isFunction(s) && !(previous instanceof Statement.Comment)
                     || s instanceof Statement.Comment && !(previous instanceof Statement.Comment)
-                    || previous instanceof Statement.Function && !(s instanceof Statement.Function);
+                    || isFunction(previous) && !isFunction(s);
             if (opensPart && previous != null) out.add(blank());
             out.addAll(statement(s));
             previous = s;
@@ -184,6 +209,49 @@ public final class PsLowering {
                                 .elseIf(st(bin(s, BinaryOperator.NOTMATCH, sq("\\s"))), block(s))
                                 .elseIf(st(bin(s, BinaryOperator.MATCH, sq(EVEN_QUOTES_THEN_SPACE))), block(trailingDoubled))
                                 .orElse(block(bin(bin(sq("\""), BinaryOperator.ADD, quotesDoubled), BinaryOperator.ADD, sq("\""))))))));
+    }
+
+    private static PsStatement koineFail() {
+        PsExpression message = var("Message"), step = var("script:KoineStep");
+        return function("koine_fail", List.of(param("string", "Message")), block(
+                if_(step, block(assign(message, dq(step, " failed: ", message)))),
+                cmd("Write-Host", message, opt("ForegroundColor"), bare("Red")),
+                exit(num(1))));
+    }
+
+    /** {@code koine_as_App}: a record made from data, field by field. */
+    private PsStatement readAsFunction(Type.Record r) {
+        PsExpression value = var("Value");
+        List<PsExpression.Entry> entries = new ArrayList<>();
+        for (Type.Record.Field f : r.fields()) entries.add(entry(f.name(), stmt(readField(f.type(), member(value, f.name())))));
+        return function(readAsName(r), List.of(param("Value")), block(
+                if_(bin(var("null"), BinaryOperator.EQ, value), block(return_(var("null")))),
+                cast("pscustomobject", hash(entries.toArray(PsExpression.Entry[]::new)))));
+    }
+
+    /** A field of data, read as its type. */
+    private PsExpression readField(Type type, PsExpression value) {
+        return switch (type) {
+            case Type.Str s -> cast("string", value);
+            case Type.Int i -> cast("long", value);
+            case Type.Bool b -> cast("bool", value);
+            case Type.Record r -> paren(cmd(readAsName(r), arg(value)));
+            // foreach goes round no times for a missing list, and @() keeps one item a list
+            case Type.ListOf l -> arr(foreach("koineItem", value, block(readField(l.element(), var("koineItem")))));
+            default -> throw new IllegalArgumentException("data cannot be read as " + type);
+        };
+    }
+
+    /** The name of the function that reads data as the record, registering it and the records it holds. */
+    private String readAsName(Type.Record r) {
+        if (!readAs.containsKey(r.name())) {
+            readAs.put(r.name(), r);
+            for (Type.Record.Field f : r.fields()) {
+                Type t = f.type() instanceof Type.ListOf l ? l.element() : f.type();
+                if (t instanceof Type.Record inner) readAsName(inner);
+            }
+        }
+        return "koine_as_" + r.name();
     }
 
     /** A space with an even number of {@code "} before it, which Windows PowerShell puts the argument in quotes for. */
@@ -223,10 +291,22 @@ public final class PsLowering {
             }
             case Statement.Put x -> List.of(assign(index(var(name(x.map())), expr(x.key())), stmt(expr(x.value()))));
             case Statement.If x -> List.of(ifStatement(x));
-            case Statement.ForEach x -> List.of(foreach(name(x.item()), stmt(collection(x.collection())), body(x.body())));
+            case Statement.ForEach x -> List.of(foreach(name(x.item()), stmt(expr(x.collection())), body(x.body())));
             case Statement.While x -> List.of(while_(stmt(expr(x.condition())), body(x.body())));
-            case Statement.Break x -> List.of(break_());
-            case Statement.Continue x -> List.of(continue_());
+            case Statement.Finally x -> List.of(new PsStatement.Try(body(x.body()), List.of(), Optional.of(body(x.cleanup()))));
+            case Statement.NativeFunction x -> {
+                if (x.os() != OS.Windows) throw new IllegalArgumentException(x.signature().name() + " is native to " + x.os() + ", not Windows");
+                if (x.body().contains("koine_fail")) usesFail = true;
+                List<PsParameter> params = x.signature().parameters().stream().map(v -> {
+                    String type = nativeType(v.type());
+                    return type == null ? param(name(v)) : param(type, name(v));
+                }).toList();
+                yield List.of(function(x.signature().name(), params, block(new PsStatement.Raw(x.body()))));
+            }
+            case Statement.Fail x -> {
+                usesFail = true;
+                yield List.of(st(cmd("koine_fail", arg(expr(x.message())))));
+            }
             case Statement.Function x -> {
                 boolean outer = inFunction;
                 inFunction = true;
@@ -242,23 +322,22 @@ public final class PsLowering {
                 yield List.of(x.function().returns().isPresent() ? pipe(c, cmd("Out-Null")) : st(c));
             }
             case Statement.Exit x -> List.of(exit(stmt(expr(x.status()))));
-            case Statement.Print x -> {
-                List<PsCommandElement> args = new ArrayList<>(List.of(arg(expr(x.message()))));
-                if (x.color() != Statement.Color.DEFAULT) {
-                    args.add(opt("ForegroundColor"));
-                    args.add(bare(x.color().name().charAt(0) + x.color().name().substring(1).toLowerCase(Locale.ROOT)));
-                }
-                yield List.of(st(cmd("Write-Host", args.toArray(PsCommandElement[]::new))));
-            }
-            case Statement.Pause x -> List.of(pipe(cmd("Read-Host", arg(expr(x.message()))), cmd("Out-Null")));
+            case Statement.Print x -> List.of(st(cmd("Write-Host", arg(expr(x.message())))));
             case Statement.Run x -> run(x);
             case Statement.EachLine x -> eachLine(x);
-            case Statement.Kill x -> List.of(st(cmd("Stop-Process", opt("InputObject"), arg(expr(x.process())), opt("Force"))));
-            case Statement.Sleep x -> List.of(st(cmd("Start-Sleep", opt("Seconds"), arg(expr(x.seconds())))));
-            case Statement.MakeDirs x -> List.of(pipe(
-                    cmd("New-Item", opt("ItemType"), bare("Directory"), opt("Force"), opt("Path"), arg(expr(x.path()))),
-                    cmd("Out-Null")));
             case Statement.Comment x -> List.of(comment(x.text()));
+        };
+    }
+
+    /** A native parameter's type, as language.md's table of native bodies gives it; null for a record, untyped. */
+    private static String nativeType(Type t) {
+        return switch (t) {
+            case Type.Str s -> "string";
+            case Type.Int i -> "long";
+            case Type.Bool b -> "bool";
+            case Type.ListOf l when l.element().equals(Type.STRING) -> "string[]";
+            case Type.ListOf l when l.element().equals(Type.INT) -> "long[]";
+            default -> null;
         };
     }
 
@@ -282,8 +361,9 @@ public final class PsLowering {
             return List.of(abort ? if_(not(ok), block(exit(num(1)))) : pipe(testSucceedsCall(c), cmd("Out-Null")));
         }
         List<PsStatement> out = new ArrayList<>();
-        // a script that ends without exit leaves $LASTEXITCODE as the last program it ran left it
-        if (abort && c.program() instanceof Expr.ScriptPath) out.add(assign(var("global:LASTEXITCODE"), num(0)));
+        // a program named by a value may be a script, and one that ends without exit leaves $LASTEXITCODE as the
+        // last program it ran left it
+        if (abort && !(c.program() instanceof Expr.StringLit)) out.add(assign(var("global:LASTEXITCODE"), num(0)));
         PsCommand command = command(c);
         out.add(inFunction ? pipe(command, cmd("Out-Host")) : st(command));
         if (abort) out.add(if_(bin(var("LASTEXITCODE"), BinaryOperator.NE, num(0)), block(exit(var("LASTEXITCODE")))));
@@ -291,9 +371,6 @@ public final class PsLowering {
     }
 
     private List<PsStatement> eachLine(Statement.EachLine x) {
-        for (Statement s : x.body())
-            if (s instanceof Statement.Break || s instanceof Statement.Continue)
-                throw new IllegalArgumentException("break and continue would leave ForEach-Object's whole pipeline, not one line: " + s);
         List<PsStatement> lines = new ArrayList<>();
         lines.add(assign(var(name(x.line())), var("_")));
         lines.addAll(body(x.body()).statements());
@@ -335,10 +412,12 @@ public final class PsLowering {
         return bareWord ? argument(a) : expr(a);
     }
 
-    /** Whether the program reads its command line by the C runtime's rules: not a script, {@code cmd} or a batch file. */
+    /**
+     * Whether the program reads its command line by the C runtime's rules: not {@code cmd} or a batch file. A
+     * {@code .ps1} named by a value cannot be told apart, so its arguments are escaped as a program's would be.
+     */
     private static boolean escapesArguments(Expr program) {
-        return !(program instanceof Expr.ScriptPath)
-                && !(program instanceof Expr.StringLit s && s.value().toLowerCase(Locale.ROOT).matches("cmd|cmd\\.exe|.*\\.(cmd|bat)"));
+        return !(program instanceof Expr.StringLit s && s.value().toLowerCase(Locale.ROOT).matches("cmd|cmd\\.exe|.*\\.(cmd|bat)"));
     }
 
     /** The program, with {@code .exe} where its name alone would run one of Windows PowerShell's aliases. */
@@ -374,7 +453,6 @@ public final class PsLowering {
             case Expr.Interp i -> interp(i.parts());
             case Expr.ListLit l -> l.items().isEmpty() ? arr() : arr(list(l.items().stream().map(this::expr).toArray(PsExpression[]::new)));
             case Expr.EmptyMap m -> invokeStatic("System.Collections.Specialized.OrderedDictionary", "new");
-            case Expr.Count c -> member(primary(expr(c.collection())), "Count");
             case Expr.At a -> index(primary(expr(a.list())), expr(a.index()));
             case Expr.Get g -> index(primary(expr(g.map())), expr(g.key()));
             case Expr.HasKey h -> invoke(primary(expr(h.map())), "Contains", expr(h.key()));
@@ -384,46 +462,20 @@ public final class PsLowering {
             case Expr.And a -> binary(expr(a.left()), BinaryOperator.AND, expr(a.right()));
             case Expr.Or o -> binary(expr(o.left()), BinaryOperator.OR, expr(o.right()));
             case Expr.Compare c -> binary(expr(c.left()), comparison(c), expr(c.right()));
-            case Expr.Choose c -> {
-                PsStatement f = if_(stmt(expr(c.condition())), block(stmt(expr(c.then())))).orElse(block(stmt(expr(c.otherwise()))));
-                // $() would unroll a list of none or one, as a function's output is
-                yield c.type() instanceof Type.ListOf ? arr(f) : sub(f);
-            }
+            case Expr.In x -> x.container().type().equals(Type.STRING)
+                    ? invoke(primary(expr(x.container())), "Contains", expr(x.item()))
+                    : binary(expr(x.container()), BinaryOperator.CCONTAINS, expr(x.item()));
             case Expr.Matches m -> binary(expr(m.text()), BinaryOperator.CMATCH, sq(Patterns.ereToDotNet(m.pattern())));
-            case Expr.EndsWith x -> invoke(primary(expr(x.text())), "EndsWith", expr(x.suffix()),
-                    staticMember("System.StringComparison", "Ordinal"));
-            case Expr.Take t -> take(t);
-            case Expr.Words w -> arr(new PsExpression.Unary(PsExpression.UnaryOperator.SPLIT, unaryOperand(expr(w.text()))));
-            case Expr.Join j -> binary(expr(j.list()), BinaryOperator.JOIN, expr(j.separator()));
-            case Expr.ScriptDir d -> var("PSScriptRoot");
-            case Expr.ScriptPath p -> paren(cmd("Join-Path", var("PSScriptRoot"), sq(p.name() + ".ps1")));
-            case Expr.Home h -> var("HOME");
-            case Expr.Env v -> var("env:" + v.name());
-            case Expr.PathJoin p -> {
-                PsExpression path = expr(p.base());
-                for (Expr part : p.parts()) path = paren(cmd("Join-Path", arg(path), argument(part)));
-                yield path;
+            case Expr.MakeRecord m -> {
+                List<PsExpression.Entry> entries = new ArrayList<>();
+                for (int i = 0; i < m.values().size(); i++)
+                    entries.add(entry(m.record().fields().get(i).name(), stmt(expr(m.values().get(i)))));
+                yield cast("pscustomobject", hash(entries.toArray(PsExpression.Entry[]::new)));
             }
-            case Expr.Parent p -> paren(cmd("Split-Path", arg(expr(p.path())), opt("Parent")));
-            case Expr.FileName f -> paren(cmd("Split-Path", arg(expr(f.path())), opt("Leaf")));
-            // [IO.Path]::GetFullPath would resolve against the process's directory, which Set-Location does not move
-            case Expr.FullPath f -> invoke(member(var("ExecutionContext"), "SessionState", "Path"), "GetUnresolvedProviderPathFromPSPath", expr(f.path()));
-            case Expr.Exists x -> paren(cmd("Test-Path", opt("LiteralPath"), arg(expr(x.path()))));
-            case Expr.ReadLines r -> arr(cmd("Get-Content", opt("LiteralPath"), arg(expr(r.path()))));
-            case Expr.ReadJson r -> paren(pipe(cmd("Get-Content", opt("LiteralPath"), arg(expr(r.path())), opt("Raw")), cmd("ConvertFrom-Json")));
-            case Expr.Field f -> field(f, false);
+            case Expr.FieldOf f -> member(primary(expr(f.record())), f.field());
+            case Expr.ReadAs r -> paren(cmd(readAsName(r.record()), arg(expr(r.data()))));
             case Expr.Succeeds s -> paren(testSucceedsCall(s.command()));
-            case Expr.Capture c -> {
-                readsOutput = true;
-                yield paren(bin(paren(command(c.command())), BinaryOperator.JOIN, dq("\n")));
-            }
-            case Expr.CommandExists c -> cast("bool", paren(cmd("Get-Command", arg(expr(program(c.name()))), opt("ErrorAction"), bare("SilentlyContinue"))));
-            case Expr.Spawn s -> paren(spawn(s));
-            case Expr.IsRunning r -> not(member(primary(expr(r.process())), "HasExited"));
-            case Expr.IsInteractive i -> bin(bin(
-                    staticMember("Environment", "UserInteractive"), BinaryOperator.AND,
-                    not(staticMember("Console", "IsInputRedirected"))), BinaryOperator.AND,
-                    not(paren(bin(invokeStatic("Environment", "GetCommandLineArgs"), BinaryOperator.MATCH, sq("^-NonI")))));
+            case Expr.Capture c -> capture(c);
             case Expr.Call c -> {
                 PsCommand call = functionCall(c.function().name(), c.arguments());
                 // a returned array comes back as nothing, one value, or an array: @() makes it an array again
@@ -439,8 +491,6 @@ public final class PsLowering {
                 case Expr.StringLit s -> s.value();
                 case Expr.IntLit i -> Long.toString(i.value());
                 case Expr.Ref r -> (PsStringPart) var(name(r.var()));
-                // a string makes text of what it holds anyway, and of a missing field, nothing
-                case Expr.Field f when f.type().equals(Type.STRING) -> sub(stmt(rawField(f)));
                 default -> expr(p) instanceof PsExpression.SubExpression s ? s : sub(stmt(expr(p)));
             });
         return dq(ps.toArray());
@@ -452,7 +502,7 @@ public final class PsLowering {
         return switch (value.type()) {
             case Type.ListOf l -> bin(member(arr(stmt(v)), "Count"), BinaryOperator.NE, num(0));
             case Type.MapOf m -> bin(member(primary(v), "Count"), BinaryOperator.NE, num(0));
-            case Type.Json j -> bin(var("null"), BinaryOperator.NE, binaryOperand(v, BinaryOperator.NE, true));
+            case Type.Record r -> bin(var("null"), BinaryOperator.NE, binaryOperand(v, BinaryOperator.NE, true));
             default -> not(isEmpty(value));
         };
     }
@@ -463,7 +513,7 @@ public final class PsLowering {
             case Type.Str s -> invokeStatic("string", "IsNullOrEmpty", v);
             case Type.ListOf l -> bin(member(arr(stmt(v)), "Count"), BinaryOperator.EQ, num(0));
             case Type.MapOf m -> bin(member(primary(v), "Count"), BinaryOperator.EQ, num(0));
-            // a missing field is $null; $null on the left, or an array would be filtered rather than compared
+            // a missing record is $null; $null on the left, or an array would be filtered rather than compared
             default -> bin(var("null"), BinaryOperator.EQ, binaryOperand(v, BinaryOperator.EQ, true));
         };
     }
@@ -480,66 +530,23 @@ public final class PsLowering {
         };
     }
 
-    /** {@code text.Substring(0, [Math]::Min(n, text.Length))}, through a temporary when text is worth evaluating once. */
-    private PsExpression take(Expr.Take t) {
-        PsExpression count = expr(t.count());
-        if (isPure(t.text())) {
-            PsExpression text = primary(expr(t.text()));
-            return invoke(text, "Substring", num(0), invokeStatic("Math", "Min", count, member(text, "Length")));
-        }
-        PsExpression.Variable tmp = var("koineTemp" + ++temporaries);
-        return sub(assign(tmp, stmt(expr(t.text()))),
-                invoke(tmp, "Substring", num(0), invokeStatic("Math", "Min", count, member(tmp, "Length"))));
-    }
-
-    private static boolean isPure(Expr e) {
-        return switch (e) {
-            case Expr.Ref r -> true;
-            case Expr.StringLit s -> true;
-            case Expr.Get g -> isPure(g.map()) && isPure(g.key());
-            case Expr.At a -> isPure(a.list()) && isPure(a.index());
-            case Expr.Field f -> isPure(f.json());
-            default -> false;
-        };
-    }
-
     /**
-     * A JSON field. In a foreach's collection, a list reads as it is, since foreach goes round no times for a missing
-     * one; elsewhere it is copied into an array, as {@code @($null)} would be an array of one.
+     * {@code $($t = (cmd) -join "`n"; if ($LASTEXITCODE -ne 0) { fallback } else { $t })}: the output, unless the
+     * command failed. Stopping exits with its status, as a failed {@link Statement.Run} does.
      */
-    private PsExpression field(Expr.Field f, boolean loopCollection) {
-        PsExpression e = rawField(f);
-        return switch (f.type()) {
-            case Type.Str s -> cast("string", e);
-            case Type.Int i -> cast("int", e);
-            case Type.Bool b -> cast("bool", e);
-            case Type.ListOf l when !loopCollection ->
-                    arr(foreach("koineItem", e, block(l.element().equals(Type.STRING) ? cast("string", var("koineItem")) : var("koineItem"))));
-            default -> e;
+    private PsExpression capture(Expr.Capture c) {
+        readsOutput = true;
+        PsExpression.Variable out = var("koineTemp" + ++temporaries);
+        PsStatement failed = switch (c.onFailure()) {
+            case Expr.Fallback.Stop s -> exit(var("LASTEXITCODE"));
+            case Expr.Fallback.Value v -> stmt(expr(v.value()));
+            case Expr.Fallback.Fail f -> {
+                usesFail = true;
+                yield st(cmd("koine_fail", arg(expr(f.message()))));
+            }
         };
-    }
-
-    /** The member path alone, {@code $app.windows.binaries}, as read. */
-    private PsExpression rawField(Expr.Field f) {
-        PsExpression e = primary(expr(f.json()));
-        for (String n : f.path()) e = member(e, n.matches("[A-Za-z_][A-Za-z0-9_]*") ? n : "'" + n.replace("'", "''") + "'");
-        return e;
-    }
-
-    private PsExpression collection(Expr e) {
-        return e instanceof Expr.Field f ? field(f, true) : expr(e);
-    }
-
-    private PsCommand spawn(Expr.Spawn s) {
-        Command c = s.command();
-        List<PsCommandElement> args = new ArrayList<>(List.of(opt("FilePath"), arg(expr(c.program()))));
-        if (!c.arguments().isEmpty()) {
-            args.add(opt("ArgumentList"));
-            args.add(arr(list(c.arguments().stream().map(this::expr).toArray(PsExpression[]::new))));
-        }
-        args.addAll(List.of(opt("WorkingDirectory"), arg(expr(s.workDir())), opt("PassThru"),
-                opt("RedirectStandardOutput"), arg(expr(s.stdout())), opt("RedirectStandardError"), arg(expr(s.stderr()))));
-        return cmd("Start-Process", args.toArray(PsCommandElement[]::new));
+        return sub(assign(out, bin(paren(command(c.command())), BinaryOperator.JOIN, dq("\n"))),
+                if_(bin(var("LASTEXITCODE"), BinaryOperator.NE, num(0)), block(failed)).orElse(block(out)));
     }
 
     // ---- PowerShell's precedence --------------------------------------------------------------------------------

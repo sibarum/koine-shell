@@ -3,26 +3,18 @@
   Everything before publishing: builds the stack, starts every application, checks the notices and versions, and generates the installers without publishing them.
 
 .DESCRIPTION
-  1. build      build.cmd: libraries in order with their tests, then each application's tests and native image
-  2. start      each application's exe, from its installer.json, must still be running after a few seconds
-  3. linux      each application with a linux section needs its Linux binaries, built in the Linux VM from
-                exactly the commits checked out here
-  4. notices    notices/notices.py --check
-  5. versions   lists each application whose installer.json version is already published
-  6. generate   deploy without -Publish, then the diff here and in ../sibarum.github.io
+  Nothing is uploaded, committed or pushed. Stops at the first failing step. It builds and starts the Windows applications, so it is for Windows only.
 
-  Nothing is uploaded, committed or pushed. Stops at the first failing step.
-
-.PARAMETER SkipBuild
+.PARAMETER skipBuild
   Use the exes already in each application's target directory.
 
-.PARAMETER Seconds
+.PARAMETER seconds
   How long each application must stay up.
 
-.PARAMETER BuildOnly
-  Stop after the notices: build, start, the Linux build and the notices checked, generating nothing.
+.PARAMETER buildOnly
+  Stop after the notices, generating nothing.
 #>
-param([switch]$SkipBuild, [int]$Seconds = 8, [switch]$BuildOnly)
+param([switch]$skipBuild, [int]$seconds = 8, [switch]$buildOnly)
 $ErrorActionPreference = 'Stop'
 # PowerShell 7.3 and later: pass programs' arguments, and leave their exit statuses, as Windows PowerShell does.
 $PSNativeCommandArgumentPassing = 'Legacy'
@@ -59,143 +51,334 @@ function ConvertTo-NativeArgument([object[]]$Value) {
     }
 }
 
-$dist = $PSScriptRoot
-$root = Split-Path $dist -Parent
-$logs = Join-Path $dist logs
-New-Item -ItemType Directory -Force -Path $logs | Out-Null
-$suite = Get-Content -LiteralPath (Join-Path $dist installer-suite.json) -Raw | ConvertFrom-Json
-$configs = @()
-foreach ($m in $suite.members) {
-    $configs += $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath((Join-Path $dist ([string]$m.config)))
+# Fails the script: the message in red, with the step it is in, then exit, which runs every finally.
+function koine_fail([string]$Message) {
+    if ($script:KoineStep) { $Message = "$script:KoineStep failed: $Message" }
+    Write-Host $Message -ForegroundColor Red
+    exit 1
 }
 
-function Step($name) { Write-Host "`n== $name" -ForegroundColor Cyan }
+# Data read as a record: only the record's fields, a missing one as empty, and every list an array.
+function koine_as_App($Value) {
+    if ($null -eq $Value) { return $null }
+    [pscustomobject]@{ id = [string]$Value.id; name = [string]$Value.name; version = [string]$Value.version; windows = koine_as_Platform $Value.windows; linux = koine_as_Platform $Value.linux }
+}
+function koine_as_Platform($Value) {
+    if ($null -eq $Value) { return $null }
+    [pscustomobject]@{ binaries = @(foreach ($koineItem in $Value.binaries) { (koine_as_Binary $koineItem) }) }
+}
+function koine_as_Binary($Value) {
+    if ($null -eq $Value) { return $null }
+    [pscustomobject]@{ name = [string]$Value.name; source = [string]$Value.source }
+}
+function koine_as_Suite($Value) {
+    if ($null -eq $Value) { return $null }
+    [pscustomobject]@{ members = @(foreach ($koineItem in $Value.members) { (koine_as_Member $koineItem) }) }
+}
+function koine_as_Member($Value) {
+    if ($null -eq $Value) { return $null }
+    [pscustomobject]@{ config = [string]$Value.config }
+}
+function koine_as_Manifest($Value) {
+    if ($null -eq $Value) { return $null }
+    [pscustomobject]@{ latest = [string]$Value.latest }
+}
 
-function Fail($msg) { Write-Host "PREFLIGHT FAILED: $msg" -ForegroundColor Red; exit 1 }
+function Script_directory {
+    return $PSScriptRoot
+}
 
-# A Python that answers --version: the Store's python.exe stub is on the path but runs nothing.
-function Find-Python {
-    foreach ($c in @('python', 'py', (Join-Path (Join-Path $HOME anaconda3) python.exe), (Join-Path (Join-Path $HOME miniconda3) python.exe))) {
-        if ([bool](Get-Command $c -ErrorAction SilentlyContinue) -and (Test-Succeeds $c @('--version') -Quiet)) {
-            return $c
-        }
-    }
+function Script_sibling([string]$name) {
+    return (Join-Path $PSScriptRoot "$name.ps1")
+}
+
+function Script_currentStep {
+    return [string]$script:KoineStep
+}
+
+function Script_setStep([string]$name) {
+    $script:KoineStep = $name
+}
+
+function Path_join([string[]]$parts) {
+    $joined = $parts[0]
+    for ($i = 1; $i -lt $parts.Count; $i++) { $joined = Join-Path $joined $parts[$i] }
+    return $joined
+}
+
+function Path_parent([string]$path) {
+    return (Split-Path -Path $path -Parent)
+}
+
+function Path_name([string]$path) {
+    return (Split-Path -Path $path -Leaf)
+}
+
+function Path_full([string]$path) {
+    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
+}
+
+function Dir_create([string]$path) {
+    $null = New-Item -ItemType Directory -Force -Path $path
+}
+
+function Dir_push([string]$path) {
+    Push-Location -LiteralPath $path
+}
+
+function Dir_pop {
+    Pop-Location
+}
+
+function File_exists([string]$path) {
+    return (Test-Path -LiteralPath $path)
+}
+
+function File_lines([string]$path) {
+    return @(Get-Content -LiteralPath $path)
+}
+
+function Json_read([string]$path) {
+    return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json)
+}
+
+function Process_start([string]$exe, [string]$log) {
+    $p = Start-Process -FilePath $exe -WorkingDirectory (Get-Location).Path -PassThru -NoNewWindow -RedirectStandardOutput $log -RedirectStandardError "$log.err"
+    return [pscustomobject]@{ id = [long]$p.Id; log = $log }
+}
+
+function Process_running($process) {
+    return $null -ne (Get-Process -Id $process.id -ErrorAction SilentlyContinue)
+}
+
+function Process_stop($process) {
+    Stop-Process -Id $process.id -Force -ErrorAction SilentlyContinue
+}
+
+function Clock_sleep([long]$seconds) {
+    Start-Sleep -Seconds $seconds
+}
+
+function Console_heading([string]$text) {
+    Write-Host "`n== $text" -ForegroundColor Cyan
+}
+
+function Console_success([string]$message) {
+    Write-Host $message -ForegroundColor Green
+}
+
+function Console_warn([string]$message) {
+    Write-Host $message -ForegroundColor Yellow
+}
+
+function Console_error([string]$message) {
+    Write-Host $message -ForegroundColor Red
+}
+
+function Console_interactive {
+    return [Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not ([Environment]::GetCommandLineArgs() -match '^-NonI')
+}
+
+function Console_pause([string]$message) {
+    $null = Read-Host $message
+}
+
+function Home_directory {
+    return $HOME
+}
+
+function String_empty {
     return ''
 }
 
-if (-not $SkipBuild) {
-    Step 'build'
-    # Its output is checked for FAILED as well as its status, so a failure can never pass as a build.
-    $failed = $false
-    cmd /c "call `"$(Join-Path $dist build.cmd)`"" | ForEach-Object {
-        $line = $_
-        Write-Host $line
-        if ($line -cmatch 'FAILED') { $failed = $true }
-    }
-    $status = $LASTEXITCODE
-    if ($status -ne 0 -or $failed) { Fail 'the build; see logs/' }
-}
-Step 'start'
-$dead = @()
-foreach ($config in $configs) {
-    $app = Get-Content -LiteralPath $config -Raw | ConvertFrom-Json
-    foreach ($b in $app.windows.binaries) {
-        if (-not ([string]$b.source).EndsWith('.exe', [System.StringComparison]::Ordinal)) { continue }
-        $exe = Join-Path (Split-Path $config -Parent) ([string]$b.source)
-        if (-not (Test-Path -LiteralPath $exe)) { $dead += "$($app.id): no $exe"; continue }
-        $out = Join-Path $logs "start-$($b.name).log"
-        $p = Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe -Parent) -PassThru -RedirectStandardOutput $out -RedirectStandardError "$out.err"
-        Start-Sleep -Seconds $Seconds
-        if (-not $p.HasExited) {
-            Write-Host "  $($b.name) up"
-            Stop-Process -InputObject $p -Force
-        } else {
-            $dead += "$($b.name) exited within ${Seconds}s; see logs/start-$($b.name).log.err"
-        }
-    }
-}
-if (@($dead).Count -ne 0) {
-    foreach ($problem in $dead) { Write-Host "  $problem" -ForegroundColor Red }
-    Fail 'an application does not start'
+function String_endsWith([string]$text, [string]$suffix) {
+    return $text.EndsWith($suffix, [System.StringComparison]::Ordinal)
 }
 
-# The Linux binaries are built in the Linux VM by build.sh, which writes logs/linux/BUILD.txt: the commit of
-# every checkout it built. They are fit to publish only while every one of those is still checked out.
-function Test-LinuxBuild {
-    $stamp = Join-Path (Join-Path $logs linux) BUILD.txt
-    if (-not (Test-Path -LiteralPath $stamp)) { return @('no Linux build: logs/linux/BUILD.txt is missing') }
+function String_take([string]$text, [long]$count) {
+    return $text.Substring(0, [Math]::Min($count, $text.Length))
+}
+
+function String_words([string]$text) {
+    return @(-split $text)
+}
+
+function Number_text([long]$number) {
+    return [string]$number
+}
+
+function List_join([string[]]$items, [string]$separator) {
+    return ($items -join $separator)
+}
+
+function Python_find {
+    $home_ = Home_directory
+    foreach ($candidate in @('python', 'py', (Path_join @($home_, 'anaconda3', 'python.exe')), (Path_join @($home_, 'miniconda3', 'python.exe')))) {
+        if (Test-Succeeds $candidate @('--version')) { return $candidate }
+    }
+    return String_empty
+}
+
+function linuxBuildProblems($logs, $root, $configs) {
+    $stamp = Path_join @($logs, 'linux', 'BUILD.txt')
+    if (-not (File_exists $stamp)) { return @('no Linux build: logs/linux/BUILD.txt is missing') }
     $builtFrom = [System.Collections.Specialized.OrderedDictionary]::new()
-    foreach ($line in @(Get-Content -LiteralPath $stamp)) {
-        if ($line -cmatch '^[\s]*(#|\z)') { continue }
-        $f = @(-split $line)
-        $builtFrom[$f[0]] = $f[1]
+    foreach ($line in @(File_lines $stamp)) {
+        if (-not ($line -cmatch '^[\s]*(#|\z)')) { $words = @(String_words $line); $builtFrom[$words[0]] = $words[1] }
     }
     $problems = @()
     foreach ($repo in @($builtFrom.Keys)) {
-        $head = (git -C (ConvertTo-NativeArgument (Join-Path $root $repo)) rev-parse HEAD) -join "`n"
+        $checkout = Path_join @($root, $repo)
+        $head = $($koineTemp1 = (git -C (ConvertTo-NativeArgument $checkout) rev-parse HEAD) -join "`n"; if ($LASTEXITCODE -ne 0) {
+            'nothing'
+        } else {
+            $koineTemp1
+        })
         if ($head -cne $builtFrom[$repo]) {
-            $problems += "${repo}: the Linux build is of $($builtFrom[$repo].Substring(0, [Math]::Min(9, $builtFrom[$repo].Length))), the checkout is at $(if ([string]::IsNullOrEmpty($head)) { 'nothing' } else { $head.Substring(0, [Math]::Min(9, $head.Length)) })"
+            $problems += "${repo}: the Linux build is of $(String_take $builtFrom[$repo] 9), the checkout is at $(String_take $head 9)"
         }
     }
     foreach ($config in $configs) {
-        $app = Get-Content -LiteralPath $config -Raw | ConvertFrom-Json
-        if ($null -eq $app.linux) { continue }
-        $repo = Split-Path (Split-Path $config -Parent) -Leaf
-        if (-not $builtFrom.Contains($repo)) { $problems += "${repo}: not in the Linux build" }
-        foreach ($b in $app.linux.binaries) {
-            if (-not (Test-Path -LiteralPath (Join-Path (Split-Path $config -Parent) ([string]$b.source)))) {
-                $problems += "$($app.id): no $($b.source)"
+        $app = koine_as_App (Json_read $config)
+        if ($null -ne $app.linux) {
+            $repo = Path_name (Path_parent $config)
+            if (-not $builtFrom.Contains($repo)) { $problems += "${repo}: not in the Linux build" }
+            foreach ($binary in $app.linux.binaries) {
+                if (-not (File_exists (Path_join @((Path_parent $config), $binary.source)))) {
+                    $problems += "$($app.id): no $($binary.source)"
+                }
             }
         }
     }
     return $problems
 }
 
-Step 'linux'
-$linuxApps = @()
-foreach ($config in $configs) {
-    $app = Get-Content -LiteralPath $config -Raw | ConvertFrom-Json
-    if ($null -ne $app.linux) { $linuxApps += [string]$app.name }
+$dist = Script_directory
+$root = Path_parent $dist
+$logs = Path_join @($dist, 'logs')
+Dir_create $logs
+$configs = @()
+$suite = koine_as_Suite (Json_read (Path_join @($dist, 'installer-suite.json')))
+foreach ($member in $suite.members) { $configs += (Path_full (Path_join @($dist, $member.config))) }
+if (-not $skipBuild) {
+    Console_heading 'Build'
+    $outerStep = Script_currentStep
+    Script_setStep 'Build'
+    try {
+        # The output is checked for FAILED as well as the exit status, so a failure can never pass as a build.
+        $buildCmd = Path_join @($dist, 'build.cmd')
+        $failed = $false
+        & $buildCmd | ForEach-Object { $line = $_; Write-Host $line; if ($line.Contains('FAILED')) { $failed = $true } }
+        $status = $LASTEXITCODE
+        if ($status -ne 0) { koine_fail "$buildCmd exited with $status" }
+        if ($failed) { koine_fail 'The build printed FAILED; see logs/' }
+    } finally { Script_setStep $outerStep }
 }
-if (@($linuxApps).Count -eq 0) {
-    Write-Host '  no application has a linux section'
-} else {
-    $interactive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not ([Environment]::GetCommandLineArgs() -match '^-NonI')
-    $problems = @(Test-LinuxBuild)
-    while (@($problems).Count -ne 0) {
-        foreach ($problem in $problems) { Write-Host "  $problem" -ForegroundColor Yellow }
-        Write-Host '  Build them in the Linux VM, from a terminal on its desktop, in this folder: ./build.sh'
-        if (-not $interactive) { Fail 'the Linux build is missing, or not of these sources' }
-        Read-Host '  Press Enter once it has finished, to check again (Ctrl+C stops)' | Out-Null
-        $problems = @(Test-LinuxBuild)
+Console_heading 'Start'
+$outerStep = Script_currentStep
+Script_setStep 'Start'
+try {
+    $dead = @()
+    foreach ($config in $configs) {
+        $app = koine_as_App (Json_read $config)
+        foreach ($binary in $app.windows.binaries) {
+            if (String_endsWith $binary.source '.exe') {
+                $exe = Path_join @((Path_parent $config), $binary.source)
+                if (-not (File_exists $exe)) {
+                    $dead += "$($app.id): no $exe"
+                } else {
+                    $log = Path_join @($logs, "start-$($binary.name).log")
+                    try {
+                        Dir_push (Path_parent $exe)
+                        $process = Process_start $exe $log
+                        Clock_sleep $seconds
+                        if (Process_running $process) {
+                            Write-Host "  $($binary.name) up"
+                            Process_stop $process
+                        } else {
+                            $dead += "$($binary.name) exited within $(Number_text $seconds)s; see logs/start-$($binary.name).log.err"
+                        }
+                    } finally { Dir_pop }
+                }
+            }
+        }
     }
-    Write-Host "  built in the VM from these sources: $($linuxApps -join ', ')"
-}
-Step 'notices'
-$python = Find-Python
-if ([string]::IsNullOrEmpty($python)) { Fail 'no Python found (python, py, or anaconda3)' }
-if (-not (Test-Succeeds $python @((ConvertTo-NativeArgument (Join-Path (Join-Path $dist notices) notices.py)), '--check'))) {
-    Fail 'the notices'
-}
-if ($BuildOnly) { Write-Host "`nBuilt, started and checked." -ForegroundColor Green; exit 0 }
-Step 'versions'
-foreach ($config in $configs) {
-    $app = Get-Content -LiteralPath $config -Raw | ConvertFrom-Json
-    $manifest = Join-Path (Join-Path (Join-Path $dist apps) ([string]$app.id)) manifest.json
-    $latest = ''
-    if (Test-Path -LiteralPath $manifest) {
-        $latest = [string](Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).latest
+    if (@($dead).Count -ne 0) {
+        foreach ($problem in $dead) { Console_error "  $problem" }
+        koine_fail 'An application does not start'
     }
-    if ($latest -ceq [string]$app.version) {
-        Write-Host "  $($app.name) $($app.version) is already published; bump it in $config if it changed" -ForegroundColor Yellow
+} finally { Script_setStep $outerStep }
+
+# The Linux binaries are built in the Linux VM by build.sh, which writes logs/linux/BUILD.txt: the commit of
+# every checkout it built. They are fit to publish only while every one of those is still checked out.
+Console_heading 'Linux'
+$outerStep = Script_currentStep
+Script_setStep 'Linux'
+try {
+    $linuxApps = @()
+    foreach ($config in $configs) {
+        $app = koine_as_App (Json_read $config)
+        if ($null -ne $app.linux) { $linuxApps += $app.name }
+    }
+    if (@($linuxApps).Count -eq 0) {
+        Write-Host '  no application has a linux section'
     } else {
-        Write-Host "  $($app.name) $($app.version) (published: $(if ([string]::IsNullOrEmpty($latest)) { 'none' } else { $latest }))"
+        $problems = @(linuxBuildProblems $logs $root $configs)
+        while (@($problems).Count -ne 0) {
+            foreach ($problem in $problems) { Console_warn "  $problem" }
+            Write-Host '  Build them in the Linux VM, from a terminal on its desktop, in this folder: ./build.sh'
+            if (-not (Console_interactive)) { koine_fail 'The Linux build is missing, or not of these sources' }
+            Console_pause '  Press Enter once it has finished, to check again (Ctrl+C stops)'
+            $problems = @(linuxBuildProblems $logs $root $configs)
+        }
+        Write-Host "  built in the VM from these sources: $(List_join $linuxApps ', ')"
     }
-}
-Step 'generate'
-if (-not (Test-Succeeds (Join-Path $PSScriptRoot 'deploy.ps1'))) { Fail 'deploy' }
-Step 'diff'
-git -C (ConvertTo-NativeArgument $dist) status --short
-$site = Join-Path $root sibarum.github.io
-if (Test-Path -LiteralPath (Join-Path $site .git)) { git -C (ConvertTo-NativeArgument $site) status --short }
-Write-Host "`nPreflight passed. Look at git diff here (and in ../sibarum.github.io), then deploy -Publish." -ForegroundColor Green
+} finally { Script_setStep $outerStep }
+Console_heading 'Notices'
+$outerStep = Script_currentStep
+Script_setStep 'Notices'
+try {
+    $python = Python_find
+    if ([string]::IsNullOrEmpty($python)) { koine_fail 'No Python found (python, py, or anaconda3)' }
+    $notices = Path_join @($dist, 'notices', 'notices.py')
+    if (-not (Test-Succeeds $python @((ConvertTo-NativeArgument $notices), '--check'))) {
+        koine_fail 'The notices are out of date'
+    }
+} finally { Script_setStep $outerStep }
+if ($buildOnly) { Console_success 'Built, started and checked.'; exit 0 }
+Console_heading 'Versions'
+$outerStep = Script_currentStep
+Script_setStep 'Versions'
+try {
+    foreach ($config in $configs) {
+        $app = koine_as_App (Json_read $config)
+        $manifest = Path_join @($dist, 'apps', $app.id, 'manifest.json')
+        $latest = String_empty
+        if (File_exists $manifest) { $latest = (koine_as_Manifest (Json_read $manifest)).latest }
+        if ($latest -ceq $app.version) {
+            Console_warn "  $($app.name) $($app.version) is already published; bump it in $config if it changed"
+        } elseif ([string]::IsNullOrEmpty($latest)) {
+            Write-Host "  $($app.name) $($app.version) (published: none)"
+        } else {
+            Write-Host "  $($app.name) $($app.version) (published: $latest)"
+        }
+    }
+} finally { Script_setStep $outerStep }
+Console_heading 'Generate'
+$outerStep = Script_currentStep
+Script_setStep 'Generate'
+try {
+    $deploy = Script_sibling 'deploy'
+    if (-not (Test-Succeeds $deploy)) { koine_fail 'deploy' }
+} finally { Script_setStep $outerStep }
+Console_heading 'Diff'
+$outerStep = Script_currentStep
+Script_setStep 'Diff'
+try {
+    try { Dir_push $dist; git status --short } finally { Dir_pop }
+    $site = Path_join @($root, 'sibarum.github.io')
+    if (File_exists (Path_join @($site, '.git'))) {
+        try { Dir_push $site; git status --short } finally { Dir_pop }
+    }
+    Console_success 'Preflight passed. Look at git diff here (and in ../sibarum.github.io), then deploy -Publish.'
+} finally { Script_setStep $outerStep }

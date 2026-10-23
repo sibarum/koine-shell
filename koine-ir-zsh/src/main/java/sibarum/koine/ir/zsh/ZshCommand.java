@@ -214,6 +214,10 @@ public sealed interface ZshCommand {
     record Comment(String text) implements ZshCommand {
     }
 
+    /** Lines of Zsh written by hand, such as a native body: each printed as it is, at the block's indentation. */
+    record Raw(String text) implements ZshCommand {
+    }
+
     /** An empty line. */
     record Blank() implements ZshCommand {
     }

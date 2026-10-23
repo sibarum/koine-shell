@@ -6,7 +6,7 @@ import java.util.List;
  * An external program and its arguments. A list argument spreads into one argument per element. Whether it must
  * succeed is up to what runs it: {@link Statement.Run}, {@link Expr.Succeeds}, {@link Expr.Capture}.
  *
- * @param program a program name found on the path, a path to one, or a {@link Expr.ScriptPath}
+ * @param program a program name found on the path, or a path to one
  * @param quiet   discard its output and errors
  */
 public record Command(Expr program, List<Expr> arguments, boolean quiet) {

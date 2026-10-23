@@ -47,15 +47,19 @@ the native code. The first use is deployment and installer scripts; a REPL comes
 
    The checker reports problems only. What the compiler will need from it, each name resolved to its declaration and
    each expression's type, comes with step 3.
-3. **Settle the IR.** *Mapped:* [ir.md](ir.md) gives every construct in preflight its node, and every node its fate.
-   The standard library preflight needs exists, with real native bodies for all three shells, and the checker uses it.
-   What remains is changing `koine-ir` and its lowerings to match: native functions, records, `Finally`, `Fail`, and
-   the moved nodes gone.
+3. **Settle the IR.** *Done:* [ir.md](ir.md) gives every construct in preflight its node, and every node its fate.
+   `koine-ir` has native functions, records, `Finally`, `Fail`, `In` and captures that say what a failure does, and
+   the nodes that are now library members are gone from it and its lowerings. Preflight is built in the IR from the
+   standard library's Windows bodies and lowers to PowerShell that parses; a probe of every construct runs, and prints
+   the same, on PowerShell and Bash. What it leaves open is at the end of ir.md.
 4. **The native-tier modules preflight needs:** `Path`, `File`, `Dir`, `Json`, `Process`, `Console`, `Script`,
    `Python`. *Written* in `koine-lang/src/main/resources/sibarum/koine/std`, with `Clock`, `Home`, `String`, `Number`
-   and `List`; their native bodies run for the first time in step 5. The installer will add `Nanobuf`.
-5. **Compile preflight for all three shells.** Compare against the expected outputs in the tests and the original
-   `preflight.ps1`, then run it for real.
+   and `List`. The probe runs the PowerShell and Bash bodies of `String`, `List`, `Path`, `File`, `Number`, `Json`
+   (PowerShell only) and `Console.warn`; the rest run first in step 5. The installer will add `Nanobuf`.
+5. **Compile preflight.** The compiler takes the checked tree to the IR: resolving `on` and `native` for the OS,
+   emitting the library members a script uses, expanding members that take a block, and reading data into records.
+   Its output for preflight should be what `Preflight.java` in `koine-ir`'s tests builds by hand. Preflight is for
+   Windows only, so it compiles to PowerShell; then run it for real, and compare it with the original `preflight.ps1`.
 6. **Port a real installer as a bootstrap script.** This is the milestone.
 
 ## After that

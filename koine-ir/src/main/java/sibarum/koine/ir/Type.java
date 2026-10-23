@@ -1,16 +1,18 @@
 package sibarum.koine.ir;
 
+import java.util.List;
+import java.util.Optional;
+
 /**
  * What a value is. Bash and Zsh need to know: a list expands as {@code "${xs[@]}"}, numbers compare with {@code -eq}
- * and strings with {@code =}, and a JSON document is text that every field read goes through {@code jq} for.
+ * and strings with {@code =}, and a record is one variable per field.
  */
 public sealed interface Type {
 
     Type STRING = new Str();
     Type INT = new Int();
     Type BOOL = new Bool();
-    Type JSON = new Json();
-    Type PROCESS = new Process();
+    Type DATA = new Data();
 
     static Type listOf(Type element) {
         return new ListOf(element);
@@ -42,19 +44,14 @@ public sealed interface Type {
         }
     }
 
-    /** A parsed JSON document, or a part of one. */
-    record Json() implements Type {
+    /**
+     * What a read such as {@code Json.read} gives, which only {@link Expr.ReadAs} can use: a parsed document in
+     * PowerShell, the document's compact text in Bash and Zsh.
+     */
+    record Data() implements Type {
         @Override
         public String toString() {
-            return "json";
-        }
-    }
-
-    /** A process started with {@link Expr.Spawn}. */
-    record Process() implements Type {
-        @Override
-        public String toString() {
-            return "process";
+            return "data";
         }
     }
 
@@ -70,6 +67,25 @@ public sealed interface Type {
         @Override
         public String toString() {
             return "map<" + value + ">";
+        }
+    }
+
+    /** A record: named, typed fields. A field marked optional may be missing, and is then empty. */
+    record Record(String name, List<Field> fields) implements Type {
+        public Record {
+            fields = List.copyOf(fields);
+        }
+
+        public Optional<Field> field(String name) {
+            return fields.stream().filter(f -> f.name().equals(name)).findFirst();
+        }
+
+        @Override
+        public String toString() {
+            return name;
+        }
+
+        public record Field(String name, Type type, boolean optional) {
         }
     }
 

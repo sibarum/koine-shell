@@ -10,7 +10,7 @@ def exists(path: String): Bool
 # A text file's lines, without their line breaks.
 def lines(path: String): [String]
   native Windows
-    return ,@(Get-Content -LiteralPath $path)
+    return @(Get-Content -LiteralPath $path)
   native Linux
     mapfile -t reply < "$path" || koine_fail "cannot read $path"
   native Mac

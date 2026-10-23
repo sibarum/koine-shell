@@ -51,15 +51,23 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 curl.exe --version
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 where.exe git
-Write-Host "sort: $(if ([bool](Get-Command 'Sort.exe' -ErrorAction SilentlyContinue)) { 'True' } else { 'False' })"
 cmd /c 'echo "as it is"'
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$git = 'git'
 $global:LASTEXITCODE = 0
-& (Join-Path $PSScriptRoot 'helper.ps1') 'a b' $quoted
+& $git 'a b' (ConvertTo-NativeArgument $quoted)
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-Write-Host "status: $(if (Test-Succeeds 'git' @('-C', (ConvertTo-NativeArgument $Dir), 'status') -Quiet) { 'True' } else { 'False' })"
-$version = (git --version) -join "`n"
-Write-Host "full path: $($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath('x.txt'))"
-$picked = @(if ([string]::IsNullOrEmpty($empty)) { @('only') } else { @() })
-Write-Host "picked: $($picked.Count)"
-Write-Host "end: $(if ("a`n" -cmatch 'a\z') { 'True' } else { 'False' }) dot: $(if ("a`nb" -cmatch '(?s)^a.b\z') { 'True' } else { 'False' }) backslash: $(if ('x\y' -cmatch '[\\]') { 'True' } else { 'False' }) bracket: $(if (']' -cmatch '^[\]a]\z') { 'True' } else { 'False' })"
+if (Test-Succeeds 'git' @('-C', (ConvertTo-NativeArgument $Dir), 'status') -Quiet) {
+    Write-Host 'status: True'
+} else {
+    Write-Host 'status: False'
+}
+$version = $($koineTemp1 = (git --version) -join "`n"; if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+} else {
+    $koineTemp1
+})
+if ("a`n" -cmatch 'a\z') { Write-Host 'end: True' } else { Write-Host 'end: False' }
+if ("a`nb" -cmatch '(?s)^a.b\z') { Write-Host 'dot: True' } else { Write-Host 'dot: False' }
+if ('x\y' -cmatch '[\\]') { Write-Host 'backslash: True' } else { Write-Host 'backslash: False' }
+if (']' -cmatch '^[\]a]\z') { Write-Host 'bracket: True' } else { Write-Host 'bracket: False' }

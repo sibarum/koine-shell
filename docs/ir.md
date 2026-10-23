@@ -1,6 +1,7 @@
 # The IR, settled against preflight
 
-Roadmap step 3: what the portable IR in `koine-ir` keeps, now that the language exists. The method was to take the
+Roadmap step 3: what the portable IR in `koine-ir` keeps, now that the language exists. The IR and its three lowerings
+are changed to match. The method was to take the
 checked preflight (`koine-lang/src/test/resources/examples/preflight.koine`) and the standard library it uses
 (`koine-lang/src/main/resources/sibarum/koine/std`), and say for every construct which IR node it becomes. A node
 nothing maps to is dropped. A node that is now a library member moves into that member's `native` bodies, with its
@@ -100,6 +101,19 @@ the table under *Native bodies* in language.md; the prologues are:
 The result comes back as language.md's rule 2 says: `REPLY` or `reply`, `reply_<field>` for a record, and the exit
 status for a `Bool`; the caller copies it at once. Koine functions use the same convention.
 
+## How it was checked
+
+- **Preflight** is built in the IR by hand in `koine-ir/src/test/java/sibarum/koine/ir/Preflight.java`, as the
+  compiler will build it: Windows only, every native function taken from the standard library's files, `step` and
+  `within` expanded. It lowers to `expected/preflight.ps1`, which Windows PowerShell 5.1 parses without errors. It has
+  not been run: running it builds the whole stack and starts every application, which is step 5.
+- **The probe** (`Probe.java`) is one script of every construct, built for each OS from that OS's native bodies. Its
+  PowerShell and Bash outputs were run, and print the same lines, those in `expected/probe.out`. The Bash run left out
+  reading data, since this machine's Git Bash has no `jq`. Running it caught a real fault: a native body that returned
+  a list as `return ,$list` came back as a list holding the list, since the caller puts `@()` round the call too.
+  Native bodies now return a list as it is.
+- **Zsh** output is read, not run: there is no Zsh here.
+
 ## Not settled here
 
 - **Records on Bash and Zsh beyond flat ones.** A record whose fields are lists of records (preflight's `App`) does
@@ -107,3 +121,11 @@ status for a `Bool`; the caller copies it at once. Koine functions use the same 
   file will.
 - **`ReadAs` on Bash and Zsh.** There `Data` is the document's compact text, and each field is read with `jq`, which
   is bundled. Nanobuf, the native format, needs its own reader in the installer milestone.
+- **A missing field without `?`** reads as empty on every shell. language.md says it should fail the script, naming
+  the file and the field; `koine_as_<Record>` and the `jq` reads are where that goes.
+- **Zsh's cleanup on `exit`.** Bash's `EXIT` trap was tried, and sees the locals of the function that called `exit`.
+  Zsh's has not been, and a cleanup that reads a caller's local, such as `Script.runStep`'s, needs it to.
+- **A `.ps1` run by a path in a variable** has its arguments escaped as a program's would be, since the lowering
+  cannot tell it is a script. Preflight runs `deploy.ps1` with no arguments, so it does not matter yet.
+- **`return` inside a block that ends with `finally`,** in a `def`: PowerShell runs the cleanup, Bash and Zsh skip it on
+  that path. The checker could refuse it until they do.

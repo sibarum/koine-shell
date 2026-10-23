@@ -238,6 +238,14 @@ public final class PsPrinter {
                 }
             }
             case BlockComment c -> write("<#" + c.text() + "#>");
+            case Raw r -> {
+                requireLines(s);
+                String[] lines = r.text().split("\n", -1);
+                for (int i = 0; i < lines.length; i++) {
+                    if (i > 0) newline();
+                    write(lines[i]);
+                }
+            }
             case Blank b -> requireLines(s);
         }
     }

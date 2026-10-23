@@ -60,10 +60,15 @@ public sealed interface Statement {
         }
     }
 
-    record Break() implements Statement {
-    }
-
-    record Continue() implements Statement {
+    /**
+     * Runs the body, then the cleanup however the body ends: normally, or through {@link Fail}, a failing command or
+     * {@link Exit}. A {@link Return} must not leave the body; the language does not allow one there.
+     */
+    record Finally(List<Statement> body, List<Statement> cleanup) implements Statement {
+        public Finally {
+            body = List.copyOf(body);
+            cleanup = List.copyOf(cleanup);
+        }
     }
 
     // ---- functions ----------------------------------------------------------------------------------------------
@@ -71,6 +76,19 @@ public sealed interface Statement {
     record Function(FunctionSig signature, List<Statement> body) implements Statement {
         public Function {
             body = List.copyOf(body);
+        }
+    }
+
+    /**
+     * A function whose body is written in the shell's own language, for one OS: a library member's {@code native}
+     * body. The lowering writes the parameters' prologue and copies the body as it is; language.md's table of native
+     * bodies says what the body can rely on.
+     */
+    record NativeFunction(FunctionSig signature, OS os, String body) implements Statement {
+        public NativeFunction {
+            for (Var p : signature.parameters())
+                if (p.type() instanceof Type.MapOf || p.type().equals(Type.DATA))
+                    throw new IllegalArgumentException(signature.name() + " cannot take " + p.type() + ": " + p.name());
         }
     }
 
@@ -88,32 +106,33 @@ public sealed interface Statement {
         }
     }
 
-    /** Ends the script with this exit status. */
+    /** Ends the script with this exit status, after the cleanup of every {@link Finally} it is in. */
     record Exit(Expr status) implements Statement {
         public Exit {
             Type.require(status, Type.INT, "an exit status");
         }
     }
 
+    /**
+     * Fails the script: prints the message in red, with the step it is in, then exits with 1 after the cleanup. It
+     * is {@code koine_fail}, which native bodies call too.
+     */
+    record Fail(Expr message) implements Statement {
+        public Fail {
+            Type.require(message, Type.STRING, "a message");
+        }
+    }
+
     // ---- output -------------------------------------------------------------------------------------------------
 
-    enum Color {DEFAULT, RED, GREEN, YELLOW, CYAN}
-
-    /** A line to the console, in a color where the console has them. */
-    record Print(Expr message, Color color) implements Statement {
+    /** A line to the console. Colour is the {@code Console} module's. */
+    record Print(Expr message) implements Statement {
         public Print {
             Type.require(message, Type.STRING, "a message");
         }
     }
 
-    /** Waits for a person to press Enter, after showing the message. */
-    record Pause(Expr message) implements Statement {
-        public Pause {
-            Type.require(message, Type.STRING, "a message");
-        }
-    }
-
-    // ---- commands and processes ---------------------------------------------------------------------------------
+    // ---- commands -----------------------------------------------------------------------------------------------
 
     enum OnFailure {
         /** A non-zero exit status ends the script with that status. */
@@ -135,25 +154,6 @@ public sealed interface Statement {
             body = List.copyOf(body);
             if (!line.type().equals(Type.STRING)) throw new IllegalArgumentException(line.name() + " must be a string");
             if (!status.type().equals(Type.INT)) throw new IllegalArgumentException(status.name() + " must be an int");
-        }
-    }
-
-    record Kill(Expr process) implements Statement {
-        public Kill {
-            Type.require(process, Type.PROCESS, "a process");
-        }
-    }
-
-    record Sleep(Expr seconds) implements Statement {
-        public Sleep {
-            Type.require(seconds, Type.INT, "seconds");
-        }
-    }
-
-    /** Creates a directory and any parents it needs; one that exists is left as it is. */
-    record MakeDirs(Expr path) implements Statement {
-        public MakeDirs {
-            Type.require(path, Type.STRING, "a path");
         }
     }
 

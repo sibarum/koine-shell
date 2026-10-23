@@ -4,7 +4,8 @@ import java.util.List;
 
 /**
  * A portable expression: what a value means, not how one shell spells it. Every expression knows its {@link Type},
- * and a record whose operands have the wrong types cannot be built.
+ * and a record whose operands have the wrong types cannot be built. What the standard library does (paths, files,
+ * processes, most of what strings and lists can do) is not here: it is a {@link Call} of a library member.
  */
 public sealed interface Expr {
 
@@ -67,18 +68,6 @@ public sealed interface Expr {
         }
     }
 
-    /** The number of items in a list or entries in a map. */
-    record Count(Expr collection) implements Expr {
-        public Count {
-            if (!(collection.type() instanceof Type.ListOf || collection.type() instanceof Type.MapOf))
-                throw new IllegalArgumentException("only a list or a map has a count: " + collection);
-        }
-
-        public Type type() {
-            return Type.INT;
-        }
-    }
-
     /** The item at a zero-based index. */
     record At(Expr list, Expr index) implements Expr {
         public At {
@@ -123,12 +112,24 @@ public sealed interface Expr {
         }
     }
 
-    /** An empty string, list or map, or a JSON value that is null or missing. */
+    /** An empty string, list or map, or a record that is missing: an optional field that was not there. */
     record IsEmpty(Expr value) implements Expr {
         public IsEmpty {
             if (!(value.type() instanceof Type.Str || value.type() instanceof Type.ListOf
-                    || value.type() instanceof Type.MapOf || value.type() instanceof Type.Json))
-                throw new IllegalArgumentException("only a string, list, map or JSON value can be empty: " + value);
+                    || value.type() instanceof Type.MapOf || value.type() instanceof Type.Record))
+                throw new IllegalArgumentException("only a string, list, map or record can be empty: " + value);
+        }
+
+        public Type type() {
+            return Type.BOOL;
+        }
+    }
+
+    /** {@code item in container}: a string in a string, case-sensitively, or an item in a list. */
+    record In(Expr item, Expr container) implements Expr {
+        public In {
+            if (container.type().equals(Type.STRING)) Type.require(item, Type.STRING, "what is looked for in a string");
+            else Type.require(item, Type.elementOf(container, "what in looks in"), "what is looked for in a list");
         }
 
         public Type type() {
@@ -188,20 +189,6 @@ public sealed interface Expr {
         }
     }
 
-    /** {@code then} if the condition holds, else {@code otherwise}; only the chosen one is evaluated. */
-    record Choose(Expr condition, Expr then, Expr otherwise) implements Expr {
-        public Choose {
-            Type.require(condition, Type.BOOL, "a condition");
-            Type.require(otherwise, then.type(), "the other choice");
-        }
-
-        public Type type() {
-            return then.type();
-        }
-    }
-
-    // ---- text ---------------------------------------------------------------------------------------------------
-
     /**
      * Whether a regular expression matches anywhere in the text. The pattern is POSIX ERE, with character classes
      * such as {@code [[:space:]]}: what Bash's and Zsh's {@code =~} take; PowerShell's lowering translates it.
@@ -216,172 +203,42 @@ public sealed interface Expr {
         }
     }
 
-    record EndsWith(Expr text, Expr suffix) implements Expr {
-        public EndsWith {
-            Type.require(text, Type.STRING, "text");
-            Type.require(suffix, Type.STRING, "a suffix");
+    // ---- records ------------------------------------------------------------------------------------------------
+
+    /** A record, made from a value for each field, in the order the record declares them. */
+    record MakeRecord(Type.Record record, List<Expr> values) implements Expr {
+        public MakeRecord {
+            values = List.copyOf(values);
+            if (values.size() != record.fields().size())
+                throw new IllegalArgumentException(record + " has " + record.fields().size() + " fields, not " + values.size());
+            for (int i = 0; i < values.size(); i++)
+                Type.require(values.get(i), record.fields().get(i).type(), record + "." + record.fields().get(i).name());
         }
 
         public Type type() {
-            return Type.BOOL;
+            return record;
         }
     }
 
-    /** The first {@code count} characters, or all of a shorter text. */
-    record Take(Expr text, Expr count) implements Expr {
-        public Take {
-            Type.require(text, Type.STRING, "text");
-            Type.require(count, Type.INT, "a count");
+    record FieldOf(Expr record, String field) implements Expr {
+        public FieldOf {
+            if (!(record.type() instanceof Type.Record r) || r.field(field).isEmpty())
+                throw new IllegalArgumentException(record.type() + " has no field " + field + ": " + record);
         }
 
         public Type type() {
-            return Type.STRING;
+            return ((Type.Record) record.type()).field(field).orElseThrow().type();
         }
     }
 
-    /** The text split at runs of whitespace, with none at either end. */
-    record Words(Expr text) implements Expr {
-        public Words {
-            Type.require(text, Type.STRING, "text");
+    /** Data from a read, as the record: only its fields are read, and a missing one reads as empty. */
+    record ReadAs(Expr data, Type.Record record) implements Expr {
+        public ReadAs {
+            Type.require(data, Type.DATA, "what is read as " + record);
         }
 
         public Type type() {
-            return Type.listOf(Type.STRING);
-        }
-    }
-
-    record Join(Expr list, Expr separator) implements Expr {
-        public Join {
-            Type.require(list, Type.listOf(Type.STRING), "what is joined");
-            Type.require(separator, Type.STRING, "a separator");
-        }
-
-        public Type type() {
-            return Type.STRING;
-        }
-    }
-
-    // ---- paths and files ----------------------------------------------------------------------------------------
-
-    /** The directory the running script is in. */
-    record ScriptDir() implements Expr {
-        public Type type() {
-            return Type.STRING;
-        }
-    }
-
-    /**
-     * The path of a sibling Koine script, by name: the file it was lowered to for the shell running this one
-     * ({@code deploy.ps1}, {@code deploy.sh}).
-     */
-    record ScriptPath(String name) implements Expr {
-        public Type type() {
-            return Type.STRING;
-        }
-    }
-
-    /** The user's home directory. */
-    record Home() implements Expr {
-        public Type type() {
-            return Type.STRING;
-        }
-    }
-
-    record Env(String name) implements Expr {
-        public Type type() {
-            return Type.STRING;
-        }
-    }
-
-    /** The path joined with each part in turn, with the platform's separator. */
-    record PathJoin(Expr base, List<Expr> parts) implements Expr {
-        public PathJoin {
-            parts = List.copyOf(parts);
-            Type.require(base, Type.STRING, "a path");
-            for (Expr p : parts) Type.require(p, Type.STRING, "a path part");
-        }
-
-        public Type type() {
-            return Type.STRING;
-        }
-    }
-
-    /** The directory a path is in. */
-    record Parent(Expr path) implements Expr {
-        public Parent {
-            Type.require(path, Type.STRING, "a path");
-        }
-
-        public Type type() {
-            return Type.STRING;
-        }
-    }
-
-    /** A path's last part. */
-    record FileName(Expr path) implements Expr {
-        public FileName {
-            Type.require(path, Type.STRING, "a path");
-        }
-
-        public Type type() {
-            return Type.STRING;
-        }
-    }
-
-    /** The absolute path, with {@code .} and {@code ..} resolved; it need not exist. */
-    record FullPath(Expr path) implements Expr {
-        public FullPath {
-            Type.require(path, Type.STRING, "a path");
-        }
-
-        public Type type() {
-            return Type.STRING;
-        }
-    }
-
-    /** Whether a file or directory is there. */
-    record Exists(Expr path) implements Expr {
-        public Exists {
-            Type.require(path, Type.STRING, "a path");
-        }
-
-        public Type type() {
-            return Type.BOOL;
-        }
-    }
-
-    record ReadLines(Expr path) implements Expr {
-        public ReadLines {
-            Type.require(path, Type.STRING, "a path");
-        }
-
-        public Type type() {
-            return Type.listOf(Type.STRING);
-        }
-    }
-
-    record ReadJson(Expr path) implements Expr {
-        public ReadJson {
-            Type.require(path, Type.STRING, "a path");
-        }
-
-        public Type type() {
-            return Type.JSON;
-        }
-    }
-
-    /**
-     * The value at a path of field names in a JSON document, read as the given type; a missing field reads as empty.
-     * The type says how to read it, as {@code jq -r} or {@code jq -c} do: a string, a number, a boolean, a JSON value,
-     * or an array of either.
-     */
-    record Field(Expr json, List<String> path, Type type) implements Expr {
-        public Field {
-            path = List.copyOf(path);
-            Type.require(json, Type.JSON, "what a field is read from");
-            if (path.isEmpty()) throw new IllegalArgumentException("a field with no name");
-            if (!List.of(Type.STRING, Type.INT, Type.BOOL, Type.JSON, Type.listOf(Type.JSON), Type.listOf(Type.STRING)).contains(type))
-                throw new IllegalArgumentException("a JSON field cannot be read as " + type);
+            return record;
         }
     }
 
@@ -394,51 +251,32 @@ public sealed interface Expr {
         }
     }
 
-    /** Runs a command and takes its output, without its trailing line breaks. Its exit status is ignored. */
-    record Capture(Command command) implements Expr {
+    /** Runs a command and takes its output, without its trailing line breaks; {@code onFailure} says what a failure does. */
+    record Capture(Command command, Fallback onFailure) implements Expr {
         public Type type() {
             return Type.STRING;
         }
     }
 
-    /** Whether a program by this name or path can be run. */
-    record CommandExists(Expr name) implements Expr {
-        public CommandExists {
-            Type.require(name, Type.STRING, "a program");
+    /** What a {@link Capture} gives when its command fails. */
+    sealed interface Fallback {
+
+        /** Nothing: the script stops with the command's exit status. */
+        record Stop() implements Fallback {
         }
 
-        public Type type() {
-            return Type.BOOL;
-        }
-    }
-
-    /** Starts a command in the background, in {@code workDir}, with its output and errors to two files. */
-    record Spawn(Command command, Expr workDir, Expr stdout, Expr stderr) implements Expr {
-        public Spawn {
-            Type.require(workDir, Type.STRING, "a working directory");
-            Type.require(stdout, Type.STRING, "the output file");
-            Type.require(stderr, Type.STRING, "the error file");
+        /** This value instead. */
+        record Value(Expr value) implements Fallback {
+            public Value {
+                Type.require(value, Type.STRING, "a capture's fallback");
+            }
         }
 
-        public Type type() {
-            return Type.PROCESS;
-        }
-    }
-
-    record IsRunning(Expr process) implements Expr {
-        public IsRunning {
-            Type.require(process, Type.PROCESS, "a process");
-        }
-
-        public Type type() {
-            return Type.BOOL;
-        }
-    }
-
-    /** Whether a person can answer a prompt: input from a terminal, and the shell not told it is non-interactive. */
-    record IsInteractive() implements Expr {
-        public Type type() {
-            return Type.BOOL;
+        /** The script fails with this message. */
+        record Fail(Expr message) implements Fallback {
+            public Fail {
+                Type.require(message, Type.STRING, "a message");
+            }
         }
     }
 

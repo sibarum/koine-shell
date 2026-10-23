@@ -112,6 +112,10 @@ public sealed interface PsStatement {
     record BlockComment(String text) implements PsStatement {
     }
 
+    /** Lines of PowerShell written by hand, such as a native body: each printed as it is, at the block's indentation. */
+    record Raw(String text) implements PsStatement {
+    }
+
     /** An empty line. */
     record Blank() implements PsStatement {
     }

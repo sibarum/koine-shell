@@ -1,19 +1,17 @@
 package sibarum.koine.ir.lower;
 
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Function;
 import java.util.regex.Pattern;
 
 import sibarum.koine.ir.Command;
 import sibarum.koine.ir.Expr;
 import sibarum.koine.ir.FunctionSig;
+import sibarum.koine.ir.OS;
 import sibarum.koine.ir.Script;
 import sibarum.koine.ir.Statement;
 import sibarum.koine.ir.Type;
@@ -44,16 +42,24 @@ import static sibarum.koine.ir.bash.Bash.*;
  *       that must succeed is written {@code cmd || exit $?}.</li>
  *   <li>Lists are arrays, expanded as {@code "${xs[@]}"}, and maps are {@code declare -A} arrays, whose keys come back
  *       in Bash's order rather than the order they were put in. Bash has no lists or maps of collections.</li>
+ *   <li>A record is one variable per field, {@code p_id} and {@code p_log}, a nested one {@code app_windows_name}. A
+ *       record that holds a list of records, and a missing optional record, do not fit, and are refused.</li>
  *   <li>A bool is 0 or 1 and tests as {@code (( b ))}; ints compare in {@code (( ))}, strings in {@code [[ ]]}, and a
  *       regular expression is matched with {@code [[ =~ ]]}, from a variable when it is not a plain word.</li>
- *   <li>What a function sets is {@code local}. A function that returns a value takes the name of the variable to put it
- *       in as its first argument, and sets it through a nameref: {@code $(f)} would run it in a subshell, and lose
- *       what it sets and an {@code exit} in it. A name the function has locals of goes through a temporary.</li>
- *   <li>A JSON value is its compact text, and every field read runs {@code jq}; a missing field reads as empty, or as 0
- *       or false for a number or a boolean.</li>
- *   <li>What a word needs computed first, a function's result, a list to count or join, a {@code choose}, goes in a
- *       temporary just before the command that uses it. In a condition it goes in the condition's own list, so that
- *       an {@code elif}, a {@code while}, the right of {@code &&} and {@code ||} still evaluate only when reached.</li>
+ *   <li>What a function sets is {@code local}. Its parameters are unpacked by a prologue: a list is passed as its
+ *       length then its items, and a record as its fields. It returns a value in {@code REPLY}, a list in
+ *       {@code reply}, a record in {@code reply_<field>}, and a bool as its exit status; the caller copies it at once.
+ *       {@code $(f)} would run it in a subshell, and lose what it sets and an {@code exit} in it. A native function is
+ *       the same prologue, then its body as it is.</li>
+ *   <li>{@link Statement.Finally} pushes a function holding its cleanup onto {@code koine_cleanups}, which an
+ *       {@code EXIT} trap runs, innermost first; on the normal path it pops it and runs it there.
+ *       {@link Statement.Fail} is {@code koine_fail}, which prints the message in red with the step
+ *       {@code koine_step} names, and exits.</li>
+ *   <li>Data from a read is the document's compact text, and each field of the record it is read as is read with
+ *       {@code jq}, from the bundle: a missing string reads as empty, a number as 0, a bool as false.</li>
+ *   <li>What a word needs computed first, a function's result, a capture, a list to join, goes in a temporary just
+ *       before the command that uses it. In a condition it goes in the condition's own list, so that an {@code elif},
+ *       a {@code while}, the right of {@code &&} and {@code ||} still evaluate only when reached.</li>
  *   <li>{@link Statement.EachLine} reads the command's lines on descriptor 3 from a process substitution: the loop runs
  *       in this shell, so what it sets stays set, and what its body reads on stdin is not the command's output. Then
  *       {@code wait $!} gives the command's status.</li>
@@ -70,16 +76,28 @@ public final class BashLowering {
             "logout", "mapfile", "popd", "printf", "pushd", "pwd", "read", "readarray", "readonly", "return", "set",
             "shift", "shopt", "source", "suspend", "test", "times", "trap", "true", "type", "typeset", "ulimit", "umask",
             "unalias", "unset", "wait", "if", "then", "else", "elif", "fi", "case", "esac", "for", "select", "while",
-            "until", "do", "done", "in", "function", "time", "coproc", "basename", "dirname", "jq", "mkdir", "realpath",
-            "sed", "sleep");
+            "until", "do", "done", "in", "function", "time", "coproc", "jq", "sed");
 
     /** Text that is the same word unquoted. */
     private static final Pattern PLAIN = Pattern.compile("[A-Za-z0-9_./:=+@%,^-]+");
     /** A regular expression that can follow {@code =~} as it is. */
     private static final Pattern PLAIN_REGEX = Pattern.compile("\\^?[A-Za-z0-9_.,:/=@%-]+\\$?");
 
-    private static final String RESULT = "koine_result";
-    private static final String DIR = "koine_dir";
+    private static final String FAIL = """
+            koine_fail() {
+                local message=$1
+                if [[ -n ${koine_step-} ]]; then message="$koine_step failed: $message"; fi
+                if [[ -t 2 ]]; then printf '\\e[31m%s\\e[0m\\n' "$message" >&2; else printf '%s\\n' "$message" >&2; fi
+                exit 1
+            }""";
+
+    private static final String CLEANUPS = """
+            koine_cleanups=()
+            koine_run_cleanups() {
+                local i
+                for (( i = ${#koine_cleanups[@]} - 1; i >= 0; i-- )); do "${koine_cleanups[i]}"; done
+            }
+            trap koine_run_cleanups EXIT""";
 
     /** {@code ||} below {@code &&} below comparisons below names and {@code !}, as {@code (( ))} groups them. */
     private static final int OR = 0, AND = 1, COMPARE = 2, ATOM = 3;
@@ -99,23 +117,22 @@ public final class BashLowering {
     private record Cmd(BashCommand command) implements Cond {
     }
 
+    /** A field of a record that is one variable: its name after the record's, {@code _windows_name}, and its type. */
+    private record Leaf(String suffix, List<String> path, Type type) {
+    }
+
     /** The function being lowered: its locals, by kind, in the order they are first set. */
     private static final class Scope {
-        final boolean returns;
         final Map<String, Kind> locals = new LinkedHashMap<>();
-
-        Scope(boolean returns) {
-            this.returns = returns;
-        }
     }
 
     /** Each pattern that needs a variable, and the variable's name. */
     private final Map<String, String> regexes = new LinkedHashMap<>();
-    /** The names a function's nameref must not be given, by function: its parameters and locals. */
-    private final Map<String, Set<String>> shadowed = new HashMap<>();
-    private boolean usesDir;
-    private boolean usesPrint;
+    /** The functions that hold a {@link Statement.Finally}'s cleanup, defined before the script's own statements. */
+    private final List<BashCommand> cleanupFunctions = new ArrayList<>();
+    private boolean usesFail;
     private int temporaries;
+    private int cleanups;
     private Scope scope;
 
     private BashLowering() {
@@ -131,27 +148,25 @@ public final class BashLowering {
         List<String> help = help(s);
         List<BashCommand> options = options(s, help.size() + 1);
         List<BashCommand> main = topLevel(s.body());
-        Map<String, Var> assigned = new LinkedHashMap<>();
+        Map<String, Kind> assigned = new LinkedHashMap<>();
         collectAssigned(s.body(), assigned);
-        List<String> maps = assigned.values().stream().filter(v -> v.type() instanceof Type.MapOf).map(BashLowering::name).toList();
+        List<String> maps = assigned.entrySet().stream().filter(e -> e.getValue() == Kind.MAP).map(Map.Entry::getKey).toList();
 
         List<BashCommand> body = new ArrayList<>();
         body.add(comment(String.join("\n", help)));
         body.add(blank());
-        if (usesDir) {
-            BashCommand cd = new BashCommand.Simple(List.of(set("CDPATH")),
-                    words("cd", "--", dq(sub(cmd("dirname", "--", dq(p("BASH_SOURCE", "0")))))), List.of());
-            body.add(assigns(set(DIR, sub(and(cd, cmd("pwd"))))));
-        }
         regexes.forEach((pattern, name) -> body.add(assigns(set(name, lit(pattern)))));
         body.addAll(options);
         body.add(blank());
-        if (usesPrint) {
-            body.add(comment("Prints a line in a color, when the output is a terminal."));
-            body.add(function("koine_print", group(
-                    if_(test(new BashCondition.Unary(UnaryTest.TERMINAL, w("1"))),
-                            cmd("printf", lit("\\e[%sm%s\\e[0m\\n"), dq(p("1")), dq(p("2"))))
-                            .orElse(List.of(cmd("printf", lit("%s\\n"), dq(p("2"))))))));
+        if (usesFail) {
+            body.add(comment("Fails the script: the message in red, with the step it is in, then exit, which runs the cleanup."));
+            body.add(new BashCommand.Raw(FAIL));
+            body.add(blank());
+        }
+        if (cleanups > 0) {
+            body.add(comment("The cleanup of each finally still open, run innermost first however the script ends."));
+            body.add(new BashCommand.Raw(CLEANUPS));
+            for (BashCommand f : cleanupFunctions) body.add(f);
             body.add(blank());
         }
         if (!maps.isEmpty()) {
@@ -230,14 +245,18 @@ public final class BashLowering {
         return out;
     }
 
+    private static boolean isFunction(Statement s) {
+        return s instanceof Statement.Function || s instanceof Statement.NativeFunction;
+    }
+
     /** The script's own statements, with a blank line before each function and each comment that starts a part. */
     private List<BashCommand> topLevel(List<Statement> statements) {
         List<BashCommand> out = new ArrayList<>();
         Statement previous = null;
         for (Statement s : statements) {
-            boolean opensPart = s instanceof Statement.Function && !(previous instanceof Statement.Comment)
+            boolean opensPart = isFunction(s) && !(previous instanceof Statement.Comment)
                     || s instanceof Statement.Comment && !(previous instanceof Statement.Comment)
-                    || previous instanceof Statement.Function && !(s instanceof Statement.Function);
+                    || isFunction(previous) && !isFunction(s);
             if (opensPart && previous != null) out.add(blank());
             out.addAll(statement(s));
             previous = s;
@@ -245,30 +264,43 @@ public final class BashLowering {
         return out;
     }
 
-    /** The variables the statements set, by their Bash names, not counting the bodies of functions they define. */
-    private static void collectAssigned(List<Statement> statements, Map<String, Var> out) {
+    /**
+     * The variables the statements set, by their Bash names and kinds, a record as its fields, not counting the
+     * bodies of functions they define.
+     */
+    private static void collectAssigned(List<Statement> statements, Map<String, Kind> out) {
         for (Statement s : statements)
             switch (s) {
-                case Statement.Set x -> out.putIfAbsent(name(x.var()), x.var());
-                case Statement.Append x -> out.putIfAbsent(name(x.list()), x.list());
-                case Statement.Put x -> out.putIfAbsent(name(x.map()), x.map());
+                case Statement.Set x -> declare(x.var(), out);
+                case Statement.Append x -> declare(x.list(), out);
+                case Statement.Put x -> declare(x.map(), out);
                 case Statement.If x -> {
                     collectAssigned(x.then(), out);
                     collectAssigned(x.otherwise(), out);
                 }
                 case Statement.ForEach x -> {
-                    out.putIfAbsent(name(x.item()), x.item());
+                    declare(x.item(), out);
                     collectAssigned(x.body(), out);
                 }
                 case Statement.While x -> collectAssigned(x.body(), out);
-                case Statement.EachLine x -> {
-                    out.putIfAbsent(name(x.line()), x.line());
+                case Statement.Finally x -> {
                     collectAssigned(x.body(), out);
-                    out.putIfAbsent(name(x.status()), x.status());
+                    collectAssigned(x.cleanup(), out);
+                }
+                case Statement.EachLine x -> {
+                    declare(x.line(), out);
+                    collectAssigned(x.body(), out);
+                    declare(x.status(), out);
                 }
                 default -> {
                 }
             }
+    }
+
+    /** A variable's Bash names and kinds: one, or one per field of a record. */
+    private static void declare(Var v, Map<String, Kind> out) {
+        if (v.type() instanceof Type.Record r) for (Leaf l : leaves(r)) out.putIfAbsent(name(v) + l.suffix(), kind(l.type()));
+        else out.putIfAbsent(name(v), kind(v.type()));
     }
 
     // ---- statements ---------------------------------------------------------------------------------------------
@@ -289,6 +321,7 @@ public final class BashLowering {
         List<BashCommand> pre = new ArrayList<>();
         switch (s) {
             case Statement.Set x -> {
+                if (x.var().type() instanceof Type.Record r) return assignRecord(name(x.var()), r, x.value());
                 return assign(name(x.var()), Optional.empty(), x.var().type(), x.value());
             }
             case Statement.Append x -> {
@@ -302,51 +335,35 @@ public final class BashLowering {
             }
             case Statement.If x -> pre.add(ifStatement(x));
             case Statement.ForEach x -> {
+                if (x.item().type() instanceof Type.Record) throw new IllegalArgumentException("Bash has no lists of records: " + x);
                 List<BashWord> items = listWords(x.collection(), pre);
                 pre.add(new BashCommand.For(name(x.item()), Optional.of(items), compoundBody(x.body())));
             }
             case Statement.While x -> pre.add(new BashCommand.While(false, conditionList(x.condition()), compoundBody(x.body())));
-            case Statement.Break x -> pre.add(cmd("break"));
-            case Statement.Continue x -> pre.add(cmd("continue"));
+            case Statement.Finally x -> finallyBlock(x, pre);
             case Statement.Function x -> pre.add(functionDefinition(x));
+            case Statement.NativeFunction x -> pre.add(nativeFunction(x));
             case Statement.Return x -> {
                 if (scope == null) {
                     if (x.value().isPresent()) throw new IllegalArgumentException("a script returns nothing; it exits: " + x);
                     pre.add(cmd("exit", "0"));
                 } else {
-                    if (scope.returns) x.value().ifPresent(v -> pre.addAll(assign(RESULT, Optional.empty(), v.type(), v)));
-                    pre.add(cmd("return"));
+                    x.value().ifPresent(v -> returnValue(v, pre));
+                    if (x.value().filter(v -> v instanceof Expr.BoolLit).isEmpty()) pre.add(cmd("return"));
                 }
             }
-            case Statement.Invoke x -> {
-                // a result nobody asked for still needs somewhere to go
-                Optional<String> result = x.function().returns().map(t -> temp(kind(t), pre));
-                pre.add(call(x.function(), x.arguments(), result, pre));
-            }
+            case Statement.Invoke x -> pre.add(call(x.function(), x.arguments(), pre));
             case Statement.Exit x -> pre.add(cmd("exit", word(str(x.status(), pre))));
-            case Statement.Print x -> {
-                BashWord message = word(str(x.message(), pre));
-                if (x.color() == Statement.Color.DEFAULT) {
-                    pre.add(cmd("printf", lit("%s\\n"), message));
-                } else {
-                    usesPrint = true;
-                    pre.add(cmd("koine_print", colorCode(x.color()), message));
-                }
+            case Statement.Fail x -> {
+                usesFail = true;
+                pre.add(cmd("koine_fail", word(str(x.message(), pre))));
             }
-            case Statement.Pause x -> {
-                // as Read-Host shows it
-                List<BashWordPart> prompt = new ArrayList<>(str(x.message(), pre));
-                prompt.add(new Literal(": "));
-                pre.add(cmd("read", "-r", "-p", word(prompt)));
-            }
+            case Statement.Print x -> pre.add(cmd("printf", lit("%s\\n"), word(str(x.message(), pre))));
             case Statement.Run x -> {
                 BashCommand c = command(x.command(), pre);
                 pre.add(x.onFailure() == Statement.OnFailure.ABORT ? or(c, cmd("exit", p("?"))) : c);
             }
             case Statement.EachLine x -> eachLine(x, pre);
-            case Statement.Kill x -> pre.add(cmd("kill", word(str(x.process(), pre))));
-            case Statement.Sleep x -> pre.add(cmd("sleep", word(str(x.seconds(), pre))));
-            case Statement.MakeDirs x -> pre.add(cmd("mkdir", "-p", "--", word(str(x.path(), pre))));
             case Statement.Comment x -> pre.add(comment(x.text()));
         }
         return pre;
@@ -378,62 +395,119 @@ public final class BashLowering {
         pre.add(assigns(set(name(x.status()), p("?"))));
     }
 
+    /**
+     * The cleanup becomes a function, pushed onto {@code koine_cleanups} before the body and popped and run after it.
+     * It runs in the caller's scope, so it sees and sets the caller's variables; only its temporaries are its own.
+     */
+    private void finallyBlock(Statement.Finally x, List<BashCommand> pre) {
+        String fname = "koine_cleanup_" + ++cleanups;
+        Scope outer = scope;
+        scope = new Scope();
+        List<BashCommand> cleanup = block(x.cleanup());
+        Scope inner = scope;
+        scope = outer;
+        List<BashCommand> fbody = new ArrayList<>(localDeclarations(inner.locals));
+        fbody.addAll(cleanup);
+        if (fbody.isEmpty()) fbody.add(cmd(":"));
+        cleanupFunctions.add(function(fname, new BashCommand.BraceGroup(fbody)));
+
+        pre.add(assigns(appendArray("koine_cleanups", fname)));
+        pre.addAll(block(x.body()));
+        pre.add(cmd("unset", sq("koine_cleanups[-1]")));
+        pre.add(cmd(fname));
+    }
+
     private BashCommand functionDefinition(Statement.Function x) {
         FunctionSig sig = x.signature();
-        String fname = functionName(sig);
         Scope outer = scope;
-        scope = new Scope(sig.returns().isPresent());
-        Set<String> params = new HashSet<>();
-        for (Var v : sig.parameters()) params.add(name(v));
-        Map<String, Var> assigned = new LinkedHashMap<>();
+        scope = new Scope();
+        Map<String, Kind> params = new LinkedHashMap<>();
+        for (Var v : sig.parameters()) declare(v, params);
+        Map<String, Kind> assigned = new LinkedHashMap<>();
         collectAssigned(x.body(), assigned);
-        assigned.forEach((n, v) -> {
-            if (!params.contains(n)) scope.locals.put(n, kind(v.type()));
+        assigned.forEach((n, k) -> {
+            if (!params.containsKey(n)) scope.locals.put(n, k);
         });
-        Set<String> names = new HashSet<>(scope.locals.keySet());
-        names.addAll(params);
-        names.add(RESULT);
-        shadowed.put(fname, names);
 
         List<BashCommand> b = block(x.body());
         Scope inner = scope;
         scope = outer;
 
-        List<BashCommand> decls = new ArrayList<>();
-        int first = 1;
-        if (inner.returns) {
-            decls.add(cmd("local", "-n", w(RESULT + "=", p("1"))));
-            first = 2;
-        }
+        List<BashCommand> decls = new ArrayList<>(prologue(sig, false));
+        decls.addAll(localDeclarations(inner.locals));
+        decls.addAll(b);
+        if (decls.isEmpty()) decls.add(cmd(":"));
+        return function(functionName(sig), new BashCommand.BraceGroup(decls));
+    }
+
+    /** The prologue, then the body as it is. Its parameters keep the names they were written with. */
+    private BashCommand nativeFunction(Statement.NativeFunction x) {
+        if (x.os() != OS.Linux) throw new IllegalArgumentException(x.signature().name() + " is native to " + x.os() + ", not Linux");
+        if (x.body().contains("koine_fail")) usesFail = true;
+        List<BashCommand> body = new ArrayList<>(prologue(x.signature(), true));
+        body.add(new BashCommand.Raw(x.body()));
+        return function(functionName(x.signature()), new BashCommand.BraceGroup(body));
+    }
+
+    /**
+     * {@code local a=$1 b=$2}: the parameters, unpacked in order. A list comes as its length then its items, so the
+     * arguments before it are shifted off first: {@code shift 2; local -a xs=("${@:2:$1}"); shift $(( $1 + 1 ))}.
+     */
+    private static List<BashCommand> prologue(FunctionSig sig, boolean written) {
+        List<BashCommand> out = new ArrayList<>();
         List<Object> scalars = new ArrayList<>(List.of("local"));
-        for (int i = 0; i < sig.parameters().size(); i++) {
-            Var v = sig.parameters().get(i);
-            String position = Integer.toString(first + i);
-            if (v.type() instanceof Type.MapOf) throw new IllegalArgumentException("a Bash function cannot take a map: " + v);
-            if (v.type() instanceof Type.ListOf) {
-                if (i != sig.parameters().size() - 1)
-                    throw new IllegalArgumentException("a Bash function takes a list only as its last parameter: " + v);
-                BashParameter rest = new BashParameter(BashParameter.Prefix.NONE, "@", Optional.empty(),
-                        Optional.of(new Substring(position, Optional.empty())));
-                decls.add(cmd("local", "-a", w(glob(name(v) + "=("), dq(rest), glob(")"))));
-            } else {
-                scalars.add(w(name(v) + "=", p(position)));
+        List<Var> ps = sig.parameters();
+        for (int i = 0; i < ps.size(); i++) {
+            Var v = ps.get(i);
+            String n = written ? writtenName(v) : name(v);
+            List<Leaf> leaves = v.type() instanceof Type.Record r ? leaves(r) : List.of(new Leaf("", List.of(), v.type()));
+            for (int j = 0; j < leaves.size(); j++) {
+                Leaf l = leaves.get(j);
+                boolean last = i == ps.size() - 1 && j == leaves.size() - 1;
+                if (l.type() instanceof Type.MapOf) throw new IllegalArgumentException("a Bash function cannot take a map: " + v);
+                if (l.type() instanceof Type.ListOf) {
+                    if (scalars.size() > 1) {
+                        out.add(cmd(scalars.toArray()));
+                        out.add(cmd("shift", Integer.toString(scalars.size() - 1)));
+                        scalars = new ArrayList<>(List.of("local"));
+                    }
+                    BashParameter items = new BashParameter(BashParameter.Prefix.NONE, "@", Optional.empty(),
+                            Optional.of(new Substring("2", Optional.of("$1"))));
+                    out.add(cmd("local", "-a", w(glob(n + l.suffix() + "=("), dq(items), glob(")"))));
+                    if (!last) out.add(cmd("shift", w(new BashWordPart.ArithmeticExpansion("$1 + 1"))));
+                } else {
+                    scalars.add(w(n + l.suffix() + "=", p(Integer.toString(scalars.size()))));
+                }
             }
         }
-        if (scalars.size() > 1) decls.add(inner.returns ? 1 : 0, cmd(scalars.toArray()));
+        if (scalars.size() > 1) out.add(cmd(scalars.toArray()));
+        return out;
+    }
+
+    private static List<BashCommand> localDeclarations(Map<String, Kind> locals) {
+        List<BashCommand> out = new ArrayList<>();
         for (Kind k : Kind.values()) {
             List<Object> words = new ArrayList<>(List.of("local"));
             if (k == Kind.ARRAY) words.add("-a");
             if (k == Kind.MAP) words.add("-A");
             int head = words.size();
-            inner.locals.forEach((n, kind) -> {
+            locals.forEach((n, kind) -> {
                 if (kind == k) words.add(n);
             });
-            if (words.size() > head) decls.add(cmd(words.toArray()));
+            if (words.size() > head) out.add(cmd(words.toArray()));
         }
-        decls.addAll(b);
-        if (decls.isEmpty()) decls.add(cmd(":"));
-        return function(fname, new BashCommand.BraceGroup(decls));
+        return out;
+    }
+
+    /** A function's result, where its caller copies it from: {@code REPLY}, {@code reply}, or its exit status. */
+    private void returnValue(Expr v, List<BashCommand> pre) {
+        switch (v.type()) {
+            case Type.Bool b when v instanceof Expr.BoolLit l -> pre.add(cmd("return", l.value() ? "0" : "1"));
+            case Type.Bool b -> pre.add(asCommand(cond(v, pre)));
+            case Type.Record r -> pre.addAll(assignRecord("reply", r, v));
+            case Type.MapOf m -> throw new IllegalArgumentException("a function cannot return a map: " + v);
+            default -> pre.addAll(assign(v.type() instanceof Type.ListOf ? "reply" : "REPLY", Optional.empty(), v.type(), v));
+        }
     }
 
     // ---- assignments --------------------------------------------------------------------------------------------
@@ -441,28 +515,14 @@ public final class BashLowering {
     /** Commands that set {@code target} (or its {@code subscript}) to the value, with what they need first. */
     private List<BashCommand> assign(String target, Optional<String> subscript, Type type, Expr value) {
         List<BashCommand> pre = new ArrayList<>();
-        switch (value) {
-            case Expr.Choose c -> {
-                return List.of(choose(c, v -> assign(target, subscript, type, v)));
-            }
-            case Expr.Call c -> {
-                Set<String> names = shadowed.get(functionName(c.function()));
-                if (subscript.isEmpty() && names != null && !names.contains(target)) {
-                    pre.add(call(c.function(), c.arguments(), Optional.of(target), pre));
-                    return pre;
-                }
-                String t = temp(kind(type), pre);
-                pre.add(call(c.function(), c.arguments(), Optional.of(t), pre));
-                pre.addAll(copy(target, subscript, type, t, pre));
-                return pre;
-            }
-            case Expr.Spawn s -> {
-                pre.add(spawn(s, pre));
-                pre.add(assigns(scalar(target, subscript, w(p("!")))));
-                return pre;
-            }
-            default -> {
-            }
+        if (value instanceof Expr.Call c && !type.equals(Type.BOOL)) {
+            pre.add(call(c.function(), c.arguments(), pre));
+            pre.addAll(copy(target, subscript, type, type instanceof Type.ListOf ? "reply" : "REPLY", pre));
+            return pre;
+        }
+        if (value instanceof Expr.Capture c) {
+            pre.add(capture(c, scalar(target, subscript, w(sub(command(c.command(), pre)))), target, subscript, pre));
+            return pre;
         }
         switch (type) {
             case Type.ListOf l -> {
@@ -482,7 +542,7 @@ public final class BashLowering {
             case Type.Bool b -> {
                 if (value instanceof Expr.BoolLit lit) {
                     pre.add(assigns(scalar(target, subscript, w(lit.value() ? "1" : "0"))));
-                } else if (value instanceof Expr.Ref || value instanceof Expr.Get || value instanceof Expr.At) {
+                } else if (value instanceof Expr.Ref || value instanceof Expr.Get || value instanceof Expr.At || value instanceof Expr.FieldOf) {
                     pre.add(assigns(scalar(target, subscript, assignWord(str(value, pre)))));
                 } else {
                     BashCommand c = asCommand(cond(value, pre));
@@ -490,12 +550,80 @@ public final class BashLowering {
                     pre.add(c instanceof BashCommand.AndOr a ? a.and(yes).or(no) : and(c, yes).or(no));
                 }
             }
+            case Type.Record r -> throw new IllegalStateException("a record is assigned field by field: " + value);
             default -> pre.add(assigns(scalar(target, subscript, assignWord(str(value, pre)))));
         }
         return pre;
     }
 
-    /** {@code target} set to the list, for values that are not a {@code choose} or a call. */
+    /**
+     * {@code target=$(cmd) || ...}: what a failed capture does. Stopping exits with its status; a fallback is set
+     * instead; a failure message fails the script.
+     */
+    private BashCommand capture(Expr.Capture c, BashAssignment set, String target, Optional<String> subscript, List<BashCommand> pre) {
+        BashCommand s = assigns(set);
+        return switch (c.onFailure()) {
+            case Expr.Fallback.Stop x -> or(s, cmd("exit", p("?")));
+            case Expr.Fallback.Value x -> or(s, assigns(scalar(target, subscript, assignWord(str(x.value(), pre)))));
+            case Expr.Fallback.Fail x -> {
+                usesFail = true;
+                yield or(s, cmd("koine_fail", word(str(x.message(), pre))));
+            }
+        };
+    }
+
+    /** Sets a record's variables, {@code prefix_field} for each field, from the value. */
+    private List<BashCommand> assignRecord(String prefix, Type.Record r, Expr value) {
+        List<BashCommand> pre = new ArrayList<>();
+        switch (value) {
+            case Expr.Call c -> {
+                pre.add(call(c.function(), c.arguments(), pre));
+                for (Leaf l : leaves(r)) pre.addAll(copy(prefix + l.suffix(), Optional.empty(), l.type(), "reply" + l.suffix(), pre));
+            }
+            case Expr.MakeRecord m -> {
+                for (int i = 0; i < m.values().size(); i++) {
+                    Type.Record.Field f = r.fields().get(i);
+                    String n = prefix + "_" + f.name();
+                    if (f.type() instanceof Type.Record inner) pre.addAll(assignRecord(n, inner, m.values().get(i)));
+                    else pre.addAll(assign(n, Optional.empty(), f.type(), m.values().get(i)));
+                }
+            }
+            case Expr.ReadAs x -> {
+                BashWord data = word(str(x.data(), pre));
+                for (Leaf l : leaves(r)) pre.add(readLeaf(prefix + l.suffix(), l, data));
+            }
+            default -> {
+                String source = recordName(value, pre);
+                if (!source.equals(prefix))
+                    for (Leaf l : leaves(r)) pre.addAll(copy(prefix + l.suffix(), Optional.empty(), l.type(), source + l.suffix(), pre));
+            }
+        }
+        return pre;
+    }
+
+    /**
+     * One field of data, read with {@code jq}: a string that is null or missing as empty, a number as 0 unless it is
+     * one, a bool as false unless it is true, a list one item a line.
+     */
+    private static BashCommand readLeaf(String target, Leaf l, BashWord data) {
+        StringBuilder path = new StringBuilder();
+        for (String n : l.path()) {
+            if (n.matches("[A-Za-z_][A-Za-z0-9_]*")) path.append('.').append(n);
+            else path.append(path.isEmpty() ? "." : "").append("[\"").append(n.replace("\\", "\\\\").replace("\"", "\\\"")).append("\"]");
+        }
+        BashRedirection from = hereString(data);
+        return switch (l.type()) {
+            case Type.Int i -> assigns(set(target, sub(cmd("jq", "-r", lit("(" + path + " | tonumber? | floor) // 0")).redirect(from))));
+            case Type.Bool b -> and(cmd("jq", "-e", lit(path + " == true")).redirect(to("/dev/null"), from), assigns(set(target, "1")))
+                    .or(assigns(set(target, "0")));
+            case Type.ListOf x when x.element().equals(Type.STRING) ->
+                    cmd("mapfile", "-t", target).redirect(fromProcess(cmd("jq", "-r", lit(path + "[]?")).redirect(from)));
+            case Type.Str s -> assigns(set(target, sub(cmd("jq", "-r", lit(path + " | values")).redirect(from))));
+            default -> throw new IllegalArgumentException("Bash cannot read data as " + l.type());
+        };
+    }
+
+    /** {@code target} set to the list, for values that are not a call. */
     private List<BashCommand> setList(String target, Expr value, List<BashCommand> pre) {
         return switch (value) {
             case Expr.ListLit l -> {
@@ -503,15 +631,11 @@ public final class BashLowering {
                 for (Expr i : l.items()) items.add(word(str(i, pre)));
                 yield List.of(assigns(new BashAssignment(target, Optional.empty(), false, new BashAssignment.Array(items))));
             }
-            case Expr.Ref r -> name(r.var()).equals(target) ? List.of()
-                    : List.of(assigns(array(target, dq(p(name(r.var()), "@")))));
             case Expr.Keys k -> List.of(assigns(array(target, dq(keys(mapName(k.map(), pre))))));
-            case Expr.Field f -> List.of(cmd("mapfile", "-t", target).redirect(fromProcess(jq(f, pre))));
-            case Expr.ReadLines r -> List.of(cmd("mapfile", "-t", target).redirect(
-                    new BashRedirection.ToFile(Optional.empty(), BashRedirection.FileOperator.IN, word(str(r.path(), pre)))));
-            // -d '' reads past the first line break, so every line's words count
-            case Expr.Words x -> List.of(cmd("read", "-r", "-d", w(), "-a", target).redirect(hereString(word(str(x.text(), pre)))));
-            default -> throw new IllegalArgumentException("Bash cannot make a list of " + value);
+            default -> {
+                String source = listName(value, pre);
+                yield source.equals(target) ? List.of() : List.of(assigns(array(target, dq(p(source, "@")))));
+            }
         };
     }
 
@@ -532,21 +656,53 @@ public final class BashLowering {
         return new BashAssignment(target, subscript, false, new BashAssignment.Scalar(word));
     }
 
-    /** An if that runs {@code branch} of whichever value the choice takes, with a chain of choices as elifs. */
-    private BashCommand.If choose(Expr.Choose c, Function<Expr, List<BashCommand>> branch) {
-        BashCommand.If f = new BashCommand.If(List.of(new BashCommand.Clause(conditionList(c.condition()), branch.apply(c.then()))),
-                Optional.empty());
-        List<BashCommand> otherwise = branch.apply(c.otherwise());
-        if (otherwise.size() == 1 && otherwise.getFirst() instanceof BashCommand.If next) {
-            for (BashCommand.Clause clause : next.clauses()) f = f.elif(clause.condition(), clause.body());
-            return next.otherwise().map(f::orElse).orElse(f);
+    // ---- records ------------------------------------------------------------------------------------------------
+
+    /** A record's fields as variables, nested records flattened; a list of records does not fit, nor does a map. */
+    private static List<Leaf> leaves(Type.Record r) {
+        List<Leaf> out = new ArrayList<>();
+        leaves(r, "", List.of(), out);
+        return out;
+    }
+
+    private static void leaves(Type.Record r, String suffix, List<String> path, List<Leaf> out) {
+        for (Type.Record.Field f : r.fields()) {
+            List<String> p = new ArrayList<>(path);
+            p.add(f.name());
+            String s = suffix + "_" + f.name();
+            switch (f.type()) {
+                case Type.Record inner -> {
+                    if (f.optional())
+                        throw new IllegalArgumentException("Bash cannot tell a missing record apart yet: " + r + "." + f.name());
+                    leaves(inner, s, p, out);
+                }
+                case Type.ListOf l when l.element() instanceof Type.Record || l.element() instanceof Type.ListOf ->
+                        throw new IllegalArgumentException("Bash has no lists of records or lists yet: " + r + "." + f.name());
+                case Type.MapOf m -> throw new IllegalArgumentException("Bash has no maps in records: " + r + "." + f.name());
+                default -> out.add(new Leaf(s, p, f.type()));
+            }
         }
-        return f.orElse(otherwise);
+    }
+
+    /** The name a record's variables start with: its variable's, a field's under it, or a temporary's. */
+    private String recordName(Expr e, List<BashCommand> pre) {
+        return switch (e) {
+            case Expr.Ref r -> name(r.var());
+            case Expr.FieldOf f -> recordName(f.record(), pre) + "_" + f.field();
+            default -> {
+                Type.Record r = (Type.Record) e.type();
+                String t = "koine_" + ++temporaries;
+                for (Leaf l : leaves(r)) {
+                    if (scope != null) scope.locals.put(t + l.suffix(), kind(l.type()));
+                }
+                pre.addAll(assignRecord(t, r, e));
+                yield t;
+            }
+        };
     }
 
     // ---- commands -----------------------------------------------------------------------------------------------
 
-    /** A program and its arguments; a sibling script runs in this Bash, so it need not be executable. */
     private BashCommand.Simple command(Command c, List<BashCommand> pre) {
         BashCommand.Simple command = new BashCommand.Simple(List.of(), commandWords(c, pre), List.of());
         return c.quiet() ? command.redirect(to("/dev/null"), errToOut()) : command;
@@ -554,7 +710,6 @@ public final class BashLowering {
 
     private List<BashWord> commandWords(Command c, List<BashCommand> pre) {
         List<BashWord> words = new ArrayList<>();
-        if (c.program() instanceof Expr.ScriptPath) words.add(w(dq(p("BASH"))));
         words.add(word(str(c.program(), pre)));
         for (Expr a : c.arguments()) {
             if (a.type() instanceof Type.ListOf) words.addAll(listWords(a, pre));
@@ -563,54 +718,48 @@ public final class BashLowering {
         return words;
     }
 
-    private BashCommand.Simple call(FunctionSig f, List<Expr> arguments, Optional<String> result, List<BashCommand> pre) {
+    /** {@code f a b}: a list as its length then its items, a record as its fields, as the prologue unpacks them. */
+    private BashCommand.Simple call(FunctionSig f, List<Expr> arguments, List<BashCommand> pre) {
         List<BashWord> words = new ArrayList<>();
         words.add(w(functionName(f)));
-        result.ifPresent(r -> words.add(w(r)));
         for (Expr a : arguments) {
-            if (a.type() instanceof Type.MapOf) throw new IllegalArgumentException("a Bash function cannot take a map: " + a);
-            if (a.type() instanceof Type.ListOf) words.addAll(listWords(a, pre));
-            else words.add(word(str(a, pre)));
+            switch (a.type()) {
+                case Type.MapOf m -> throw new IllegalArgumentException("a Bash function cannot take a map: " + a);
+                case Type.ListOf l -> listArgument(a, words, pre);
+                case Type.Record r -> {
+                    String n = recordName(a, pre);
+                    for (Leaf l : leaves(r)) {
+                        if (l.type() instanceof Type.ListOf) {
+                            words.add(w(length(n + l.suffix(), "@")));
+                            words.add(w(dq(p(n + l.suffix(), "@"))));
+                        } else {
+                            words.add(w(dq(p(n + l.suffix()))));
+                        }
+                    }
+                }
+                default -> words.add(word(str(a, pre)));
+            }
         }
         return new BashCommand.Simple(List.of(), words, List.of());
     }
 
-    /** {@code (cd -- dir && exec program args) > out 2> err &}: exec, so that {@code $!} is the program itself. */
-    private BashCommand spawn(Expr.Spawn s, List<BashCommand> pre) {
-        BashWord dir = word(str(s.workDir(), pre));
-        List<BashWord> run = new ArrayList<>(List.of(w("exec")));
-        run.addAll(commandWords(s.command(), pre));
-        BashCommand body = and(cmd("cd", "--", dir), new BashCommand.Simple(List.of(), run, List.of()));
-        return bg(redirected(subshell(body),
-                new BashRedirection.ToFile(Optional.empty(), BashRedirection.FileOperator.OUT, word(str(s.stdout(), pre))),
-                new BashRedirection.ToFile(Optional.of(2), BashRedirection.FileOperator.OUT, word(str(s.stderr(), pre)))));
-    }
-
-    /**
-     * {@code jq} reading a field, from the file when the document is one just read, else from the variable. A string
-     * or JSON field that is null or missing gives no output; a number reads as 0 unless it is one, a boolean as false
-     * unless it is true; a list gives one item a line.
-     */
-    private BashCommand.Simple jq(Expr.Field f, List<BashCommand> pre) {
-        StringBuilder path = new StringBuilder();
-        for (String n : f.path()) {
-            if (n.matches("[A-Za-z_][A-Za-z0-9_]*")) path.append('.').append(n);
-            else path.append(path.isEmpty() ? "." : "").append("[\"").append(n.replace("\\", "\\\\").replace("\"", "\\\"")).append("\"]");
+    private void listArgument(Expr a, List<BashWord> words, List<BashCommand> pre) {
+        switch (a) {
+            case Expr.ListLit l -> {
+                words.add(w(Integer.toString(l.items().size())));
+                for (Expr i : l.items()) words.add(word(str(i, pre)));
+            }
+            case Expr.Keys k -> {
+                String map = mapName(k.map(), pre);
+                words.add(w(length(map, "@")));
+                words.add(w(dq(keys(map))));
+            }
+            default -> {
+                String list = listName(a, pre);
+                words.add(w(length(list, "@")));
+                words.add(w(dq(p(list, "@"))));
+            }
         }
-        String[] flagAndFilter = switch (f.type()) {
-            case Type.Int i -> new String[]{"-r", "(" + path + " | tonumber? | floor) // 0"};
-            case Type.Bool b -> new String[]{"-e", path + " == true"};
-            case Type.Json j -> new String[]{"-c", path + " | values"};
-            case Type.ListOf l when l.element().equals(Type.JSON) -> new String[]{"-c", path + "[]?"};
-            case Type.ListOf l -> new String[]{"-r", path + "[]?"};
-            default -> new String[]{"-r", path + " | values"};
-        };
-        List<BashWord> words = new ArrayList<>(List.of(w("jq"), w(flagAndFilter[0]), lit(flagAndFilter[1])));
-        if (f.json() instanceof Expr.ReadJson r) {
-            words.add(word(str(r.path(), pre)));
-            return new BashCommand.Simple(List.of(), words, List.of());
-        }
-        return new BashCommand.Simple(List.of(), words, List.of(hereString(word(str(f.json(), pre)))));
     }
 
     private static BashRedirection fromProcess(BashCommand command) {
@@ -621,14 +770,15 @@ public final class BashLowering {
     // ---- words --------------------------------------------------------------------------------------------------
 
     /**
-     * A string, number, bool, JSON value or process, as the parts of a word, the kinds double quotes can hold. What
-     * cannot be a part of a word is put in a temporary first.
+     * A string, number, bool or data, as the parts of a word, the kinds double quotes can hold. What cannot be a part
+     * of a word is put in a temporary first.
      */
     private List<BashWordPart> str(Expr e, List<BashCommand> pre) {
-        if (e.type() instanceof Type.ListOf || e.type() instanceof Type.MapOf)
-            throw new IllegalArgumentException("a list or a map is not one word: " + e);
-        boolean computed = e instanceof Expr.Choose || e instanceof Expr.Call || e instanceof Expr.Spawn
-                || e.type().equals(Type.BOOL) && !(e instanceof Expr.BoolLit || e instanceof Expr.Ref || e instanceof Expr.Get || e instanceof Expr.At);
+        if (e.type() instanceof Type.ListOf || e.type() instanceof Type.MapOf || e.type() instanceof Type.Record)
+            throw new IllegalArgumentException("a list, a map or a record is not one word: " + e);
+        boolean computed = e instanceof Expr.Call || e instanceof Expr.Capture
+                || e.type().equals(Type.BOOL) && !(e instanceof Expr.BoolLit || e instanceof Expr.Ref || e instanceof Expr.Get
+                || e instanceof Expr.At || e instanceof Expr.FieldOf);
         if (computed) {
             String t = temp(Kind.SCALAR, pre);
             pre.addAll(assign(t, Optional.empty(), e.type(), e));
@@ -644,7 +794,6 @@ public final class BashLowering {
                 for (Expr part : i.parts()) out.addAll(str(part, pre));
                 yield out;
             }
-            case Expr.Count c -> List.of(length(collectionName(c.collection(), pre), "@"));
             case Expr.At a -> {
                 String list = listName(a.list(), pre);
                 yield List.of(p(list, arithmetic(a.index(), pre)));
@@ -653,78 +802,9 @@ public final class BashLowering {
                 String map = mapName(g.map(), pre);
                 yield List.of(p(map, key(g.key(), pre)));
             }
-            case Expr.Take t -> List.of(take(t, pre));
-            case Expr.Join j -> List.of(p(join(j, pre)));
-            case Expr.ScriptDir d -> {
-                usesDir = true;
-                yield List.of(p(DIR));
-            }
-            case Expr.ScriptPath s -> {
-                usesDir = true;
-                yield List.of(p(DIR), new Literal("/" + s.name() + ".sh"));
-            }
-            case Expr.Home h -> List.of(p("HOME"));
-            case Expr.Env v -> {
-                if (!v.name().matches("[A-Za-z_][A-Za-z0-9_]*"))
-                    throw new IllegalArgumentException("Bash cannot read an environment variable named " + v.name());
-                yield List.of(p(v.name()));
-            }
-            case Expr.PathJoin j -> {
-                List<BashWordPart> out = new ArrayList<>(str(j.base(), pre));
-                for (Expr part : j.parts()) {
-                    out.add(new Literal("/"));
-                    out.addAll(str(part, pre));
-                }
-                yield out;
-            }
-            case Expr.Parent x -> List.of(sub(cmd("dirname", "--", word(str(x.path(), pre)))));
-            case Expr.FileName x -> List.of(sub(cmd("basename", "--", word(str(x.path(), pre)))));
-            // -m: it need not exist; -s: .. is resolved as text, as .NET's GetFullPath does, not through links
-            case Expr.FullPath x -> List.of(sub(cmd("realpath", "-ms", "--", word(str(x.path(), pre)))));
-            case Expr.ReadJson r -> List.of(sub(cmd("jq", "-c", ".", word(str(r.path(), pre)))));
-            case Expr.Field f -> List.of(sub(jq(f, pre)));
-            case Expr.Capture c -> List.of(sub(command(c.command(), pre)));
+            case Expr.FieldOf f -> List.of(p(recordName(f.record(), pre) + "_" + f.field()));
             default -> throw new IllegalArgumentException("not a word in Bash: " + e);
         };
-    }
-
-    /** {@code ${text:0:count}}, of a variable, a map entry or a list item, or else of a temporary holding the text. */
-    private BashParameter take(Expr.Take t, List<BashCommand> pre) {
-        String name;
-        Optional<String> subscript = Optional.empty();
-        switch (t.text()) {
-            case Expr.Ref r -> name = name(r.var());
-            case Expr.Get g -> {
-                name = mapName(g.map(), pre);
-                subscript = Optional.of(key(g.key(), pre));
-            }
-            case Expr.At a -> {
-                name = listName(a.list(), pre);
-                subscript = Optional.of(arithmetic(a.index(), pre));
-            }
-            default -> {
-                name = temp(Kind.SCALAR, pre);
-                pre.addAll(assign(name, Optional.empty(), Type.STRING, t.text()));
-            }
-        }
-        Substring op = new Substring("0", Optional.of(arithmetic(t.count(), pre)));
-        return new BashParameter(BashParameter.Prefix.NONE, name, subscript, Optional.of(op));
-    }
-
-    /** A temporary holding the items with the separator between them: the first, then the separator and each other. */
-    private String join(Expr.Join j, List<BashCommand> pre) {
-        String list = listName(j.list(), pre);
-        List<BashWordPart> separator = str(j.separator(), pre);
-        String out = temp(Kind.SCALAR, pre);
-        String item = temp(Kind.SCALAR, pre);
-        List<BashWordPart> appended = new ArrayList<>(separator);
-        appended.add(p(item));
-        BashParameter rest = new BashParameter(BashParameter.Prefix.NONE, list, Optional.of("@"),
-                Optional.of(new Substring("1", Optional.empty())));
-        pre.add(assigns(set(out, p(list, "0"))));
-        pre.add(for_(item, List.of(w(dq(rest))),
-                assigns(new BashAssignment(out, Optional.empty(), true, new BashAssignment.Scalar(word(appended))))));
-        return out;
     }
 
     /** A list as the words it spreads into. */
@@ -740,9 +820,10 @@ public final class BashLowering {
         };
     }
 
-    /** The array a list is in: its variable, or a temporary. */
+    /** The array a list is in: its variable, a record's field, or a temporary. */
     private String listName(Expr e, List<BashCommand> pre) {
         if (e instanceof Expr.Ref r) return name(r.var());
+        if (e instanceof Expr.FieldOf f) return recordName(f.record(), pre) + "_" + f.field();
         String t = temp(Kind.ARRAY, pre);
         pre.addAll(assign(t, Optional.empty(), e.type(), e));
         return t;
@@ -773,7 +854,7 @@ public final class BashLowering {
         return switch (e) {
             case Expr.IntLit i -> i.value() < 0 ? "(" + i.value() + ")" : Long.toString(i.value());
             case Expr.Ref r -> name(r.var());
-            case Expr.Count c -> "${#" + collectionName(c.collection(), pre) + "[@]}";
+            case Expr.FieldOf f -> recordName(f.record(), pre) + "_" + f.field();
             default -> {
                 String t = temp(Kind.SCALAR, pre);
                 pre.addAll(assign(t, Optional.empty(), Type.INT, e));
@@ -872,38 +953,47 @@ public final class BashLowering {
         return switch (e) {
             case Expr.BoolLit b -> new Cmd(cmd(b.value() ? "true" : "false"));
             case Expr.Ref r -> new Arith(name(r.var()), ATOM);
+            case Expr.FieldOf f -> new Arith(recordName(f.record(), pre) + "_" + f.field(), ATOM);
             case Expr.Not n -> n.operand() instanceof Expr.IsEmpty x ? isEmpty(x.value(), false, pre) : negated(cond(n.operand(), pre));
             case Expr.And a -> combine(a.left(), a.right(), true, pre);
             case Expr.Or o -> combine(o.left(), o.right(), false, pre);
             case Expr.Compare c -> compare(c, pre);
-            case Expr.Choose c -> new Cmd(choose(c, this::conditionList));
             case Expr.Matches m -> new Test(new BashCondition.Binary(word(str(m.text(), pre)), BinaryTest.REGEX, regex(m.pattern())));
-            case Expr.EndsWith x -> {
-                BashWord text = word(str(x.text(), pre));
-                // a quoted suffix matches as text, after the * that matches anything before it
-                List<BashWordPart> pattern = new ArrayList<>(List.of(glob("*")));
-                pattern.addAll(word(str(x.suffix(), pre)).parts());
-                yield new Test(new BashCondition.Binary(text, BinaryTest.MATCHES, new BashWord(pattern)));
-            }
+            case Expr.In x -> in(x, pre);
             case Expr.IsEmpty x -> isEmpty(x.value(), true, pre);
             case Expr.HasKey h -> {
                 String map = mapName(h.map(), pre);
                 BashParameter set = op(map, key(h.key(), pre), new Default(false, DefaultKind.USE_ALTERNATE, w("set")));
                 yield new Test(new BashCondition.Unary(UnaryTest.NOT_EMPTY, w(dq(set))));
             }
-            case Expr.Exists x -> new Test(new BashCondition.Unary(UnaryTest.EXISTS, word(str(x.path(), pre))));
             case Expr.Succeeds s -> new Cmd(command(s.command(), pre));
-            case Expr.CommandExists c -> new Cmd(cmd("command", "-v", word(str(c.name(), pre))).redirect(to("/dev/null")));
-            case Expr.IsRunning r -> new Cmd(cmd("kill", "-0", word(str(r.process(), pre))).redirect(toFd(2, "/dev/null")));
-            case Expr.IsInteractive i -> new Test(new BashCondition.Unary(UnaryTest.TERMINAL, w("0")));
-            case Expr.Field f -> new Cmd(jq(f, pre).redirect(to("/dev/null")));
+            case Expr.Call c -> new Cmd(call(c.function(), c.arguments(), pre));
             default -> {
-                // a function's result, a map entry or a list item: 0 or 1, in a temporary
+                // a map entry or a list item: 0 or 1, in a temporary
                 String t = temp(Kind.SCALAR, pre);
                 pre.addAll(assign(t, Optional.empty(), Type.BOOL, e));
                 yield new Arith(t, ATOM);
             }
         };
+    }
+
+    /**
+     * A string in a string: {@code [[ $text == *"$part"* ]]}, quoted so that it matches as text. An item in a list:
+     * a loop that sets a temporary to 1 when it finds it.
+     */
+    private Cond in(Expr.In x, List<BashCommand> pre) {
+        List<BashWordPart> item = str(x.item(), pre);
+        if (x.container().type().equals(Type.STRING)) {
+            List<BashWordPart> pattern = new ArrayList<>(List.of(glob("*")));
+            pattern.addAll(quoted(item).parts());
+            pattern.add(glob("*"));
+            return new Test(new BashCondition.Binary(word(str(x.container(), pre)), BinaryTest.MATCHES, new BashWord(pattern)));
+        }
+        String found = temp(Kind.SCALAR, pre), each = temp(Kind.SCALAR, pre);
+        pre.add(assigns(set(found, "0")));
+        BashCommand matches = test(new BashCondition.Binary(w(p(each)), BinaryTest.MATCHES, quoted(item)));
+        pre.add(for_(each, listWords(x.container(), pre), and(matches, group(assigns(set(found, "1")), cmd("break")))));
+        return new Arith(found, ATOM);
     }
 
     /**
@@ -988,9 +1078,10 @@ public final class BashLowering {
     }
 
     private Cond isEmpty(Expr value, boolean empty, List<BashCommand> pre) {
+        if (value.type() instanceof Type.Record)
+            throw new IllegalArgumentException("Bash cannot tell a missing record apart yet: " + value);
         if (value.type() instanceof Type.ListOf || value.type() instanceof Type.MapOf)
             return new Arith("${#" + collectionName(value, pre) + "[@]} " + (empty ? "==" : "!=") + " 0", COMPARE);
-        // a JSON value that is null or missing is read as no text at all
         return new Test(new BashCondition.Unary(empty ? UnaryTest.EMPTY : UnaryTest.NOT_EMPTY, word(str(value, pre))));
     }
 
@@ -1014,23 +1105,19 @@ public final class BashLowering {
         return t instanceof Type.ListOf ? Kind.ARRAY : t instanceof Type.MapOf ? Kind.MAP : Kind.SCALAR;
     }
 
-    private static String colorCode(Statement.Color c) {
-        return switch (c) {
-            case RED -> "31";
-            case GREEN -> "32";
-            case YELLOW -> "33";
-            case CYAN -> "36";
-            case DEFAULT -> "0";
-        };
-    }
-
-    /** A variable's Bash name, snake_case, clear of Bash's own and of the lowering's temporaries. */
+    /** A variable's Bash name, snake_case, clear of Bash's own, the lowering's temporaries and the results. */
     private static String name(Var v) {
         if (v.type() instanceof Type.ListOf l && (l.element() instanceof Type.ListOf || l.element() instanceof Type.MapOf)
                 || v.type() instanceof Type.MapOf m && (m.value() instanceof Type.ListOf || m.value() instanceof Type.MapOf))
             throw new IllegalArgumentException("Bash has no lists or maps of collections: " + v);
         String n = snake(v.name());
-        return n.equals("_") || n.startsWith("koine_") ? n + "_" : n;
+        return n.equals("_") || n.startsWith("koine_") || n.equals("reply") ? n + "_" : n;
+    }
+
+    /** A native function's parameter, by the name its body uses. */
+    private static String writtenName(Var v) {
+        if (!v.name().matches("[A-Za-z_][A-Za-z0-9_]*")) throw new IllegalArgumentException("not a name Bash can have: " + v.name());
+        return v.name();
     }
 
     private static String functionName(FunctionSig f) {
@@ -1048,7 +1135,7 @@ public final class BashLowering {
         StringBuilder b = new StringBuilder();
         for (int i = 0; i < name.length(); i++) {
             char c = name.charAt(i);
-            if (c == '-') {
+            if (c == '-' || c == '.') {
                 b.append('_');
                 continue;
             }

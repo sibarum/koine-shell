@@ -12,6 +12,7 @@ import java.util.function.Supplier;
 import sibarum.koine.ir.Command;
 import sibarum.koine.ir.Expr;
 import sibarum.koine.ir.FunctionSig;
+import sibarum.koine.ir.OS;
 import sibarum.koine.ir.Script;
 import sibarum.koine.ir.Statement;
 import sibarum.koine.ir.Type;
@@ -32,20 +33,25 @@ import static sibarum.koine.ir.zsh.Zsh.*;
  * Lowers a portable script to Zsh (5.x, which macOS ships). The script and each function start with
  * {@code emulate -L zsh}, so the user's options don't change what it does.
  * <ul>
- *   <li>Every value is text. A bool is 1 or 0, tested with {@code (( ))}; a JSON value is its compact text, and every
- *       field read goes through {@code jq}, a missing field reading as empty (and {@code false} too, as {@code //}
- *       has it).</li>
+ *   <li>Every value is text. A bool is 1 or 0, tested with {@code (( ))}.</li>
  *   <li>Lists are arrays, which count from 1, so {@code At(i)} reads {@code [i+1]}. Maps are {@code typeset -A}, in
- *       no particular order. Where output splits into lines ({@link Expr.ReadLines}, a JSON list), blank lines are
- *       dropped, as {@code ${(f)...}} has it.</li>
- *   <li>A value that needs a command run first (a function's result, a choice, a spawned process) has it run just
- *       before the command that uses it; in a condition, inside it, so {@code and}, {@code or} and {@code choose}
- *       evaluate only what they must.</li>
- *   <li>A function returns a value in {@code REPLY}, a list (or a map's keys and values) in {@code reply}, and a bool
- *       as its exit status: {@code $(f)} would run it in a subshell, which loses what it sets, and its exit. Every
- *       variable a function sets is local to it, as in PowerShell.</li>
+ *       no particular order.</li>
+ *   <li>A record is one variable per field, {@code p_id} and {@code p_log}, a nested one {@code app_windows_name}. A
+ *       record that holds a list of records, and a missing optional record, do not fit, and are refused.</li>
+ *   <li>A value that needs a command run first (a function's result, a capture) has it run just before the command
+ *       that uses it; in a condition, inside it, so {@code and} and {@code or} evaluate only what they must.</li>
+ *   <li>A function's parameters are unpacked by a prologue: a list is passed as its length then its items, and a
+ *       record as its fields. It returns a value in {@code REPLY}, a list in {@code reply}, a record in
+ *       {@code reply_<field>}, and a bool as its exit status: {@code $(f)} would run it in a subshell, which loses what
+ *       it sets, and its exit. Every variable a function sets is local to it, as in PowerShell. A native function's
+ *       parameters are {@code local -h}, so that one named like a special parameter, {@code path}, is ordinary.</li>
  *   <li>{@link Statement.OnFailure#ABORT} is {@code cmd || exit $?}, written out: {@code set -e} is switched off in
  *       conditions and in functions called from them.</li>
+ *   <li>{@link Statement.Finally} pushes a function holding its cleanup onto {@code koine_cleanups}, which an
+ *       {@code EXIT} trap runs, innermost first, since an {@code exit} skips {@code always} blocks; on the normal path
+ *       it pops it and runs it there. {@link Statement.Fail} is {@code koine_fail}.</li>
+ *   <li>Data from a read is the document's compact text, and each field of the record it is read as is read with
+ *       {@code jq}, from the bundle.</li>
  *   <li>{@link Statement.EachLine} pipes into {@code while read}: Zsh runs a pipeline's last command in this shell,
  *       so what the body sets stays set, and {@code $pipestatus} has the command's status. The body reads its stdin
  *       from the command.</li>
@@ -62,14 +68,35 @@ public final class ZshLowering {
             "fignore", "dirstack", "jobstates", "jobtexts", "jobdirs", "nameddirs", "userdirs", "LANG", "TERM",
             "COLUMNS", "LINES", "NULLCMD", "TRY_BLOCK_ERROR", "ZSH_ARGZERO", "ZSH_VERSION", "_");
 
-    private static final Map<Statement.Color, String> COLORS = Map.of(Statement.Color.RED, "\u001b[31m",
-            Statement.Color.GREEN, "\u001b[32m", Statement.Color.YELLOW, "\u001b[33m", Statement.Color.CYAN, "\u001b[36m");
+    private static final String FAIL = """
+            koine_fail() {
+                local message=$1
+                if [[ -n ${koine_step-} ]]; then message="$koine_step failed: $message"; fi
+                if [[ -t 2 ]]; then print -u2 -r -- $'\\e[31m'"$message"$'\\e[0m'; else print -u2 -r -- "$message"; fi
+                exit 1
+            }""";
+
+    private static final String CLEANUPS = """
+            koine_cleanups=()
+            koine_run_cleanups() {
+                local i
+                for (( i = ${#koine_cleanups}; i >= 1; i-- )); do "${koine_cleanups[i]}"; done
+            }
+            trap koine_run_cleanups EXIT""";
+
+    /** A field of a record that is one variable: its name after the record's, {@code _windows_name}, and its type. */
+    private record Leaf(String suffix, List<String> path, Type type) {
+    }
 
     /** Commands that the expression being lowered needs run before the command that uses it. */
     private List<ZshCommand> setup = new ArrayList<>();
     /** The temporaries of the function being lowered, which it declares local; null outside a function. */
     private Map<String, Type> functionTemps;
+    /** The functions that hold a {@link Statement.Finally}'s cleanup, defined before the script's own statements. */
+    private final List<ZshCommand> cleanupFunctions = new ArrayList<>();
+    private boolean usesFail;
     private int temporaries;
+    private int cleanups;
 
     private ZshLowering() {
     }
@@ -86,7 +113,19 @@ public final class ZshLowering {
         body.add(blank());
         body.addAll(options(s));
         body.add(blank());
-        body.addAll(topLevel(s.body()));
+        List<ZshCommand> main = topLevel(s.body());
+        if (usesFail) {
+            body.add(comment("Fails the script: the message in red, with the step it is in, then exit, which runs the cleanup."));
+            body.add(new ZshCommand.Raw(FAIL));
+            body.add(blank());
+        }
+        if (cleanups > 0) {
+            body.add(comment("The cleanup of each finally still open, run innermost first however the script ends."));
+            body.add(new ZshCommand.Raw(CLEANUPS));
+            body.addAll(cleanupFunctions);
+            body.add(blank());
+        }
+        body.addAll(main);
         return new ZshScript(Optional.of("/usr/bin/env zsh"), body);
     }
 
@@ -150,14 +189,18 @@ public final class ZshLowering {
         return "  " + head + " ".repeat(width - head.length()) + String.join("\n" + pad, help.lines().toList()) + "\n";
     }
 
+    private static boolean isFunction(Statement s) {
+        return s instanceof Statement.Function || s instanceof Statement.NativeFunction;
+    }
+
     /** The script's own statements, with a blank line before each function and each comment that starts a part. */
     private List<ZshCommand> topLevel(List<Statement> statements) {
         List<ZshCommand> out = new ArrayList<>();
         Statement previous = null;
         for (Statement s : statements) {
-            boolean opensPart = s instanceof Statement.Function && !(previous instanceof Statement.Comment)
+            boolean opensPart = isFunction(s) && !(previous instanceof Statement.Comment)
                     || s instanceof Statement.Comment && !(previous instanceof Statement.Comment)
-                    || previous instanceof Statement.Function && !(s instanceof Statement.Function);
+                    || isFunction(previous) && !isFunction(s);
             if (opensPart && previous != null) out.add(blank());
             out.addAll(statement(s));
             previous = s;
@@ -187,34 +230,35 @@ public final class ZshLowering {
 
     private List<ZshCommand> statement(Statement s) {
         return scoped(() -> switch (s) {
-            case Statement.Set x -> assign(name(x.var()), x.var().type(), x.value());
+            case Statement.Set x -> x.var().type() instanceof Type.Record r
+                    ? assignRecord(name(x.var()), r, x.value())
+                    : assign(name(x.var()), x.var().type(), x.value());
             case Statement.Append x -> List.of(assigns(new ZshAssignment(name(x.list()), Optional.empty(), true,
                     new ZshAssignment.Array(List.of(arg(element(x.item())))))));
             case Statement.Put x -> List.of(assigns(new ZshAssignment(name(x.map()), Optional.of(subscript(text(x.key()))), false,
                     new ZshAssignment.Scalar(bareWord(element(x.value()))))));
             case Statement.If x -> List.of(ifCommand(x));
-            case Statement.ForEach x -> List.of(new ZshCommand.For(List.of(name(x.item())), Optional.of(listWords(x.collection())), body(x.body())));
+            case Statement.ForEach x -> {
+                if (x.item().type() instanceof Type.Record) throw new IllegalArgumentException("Zsh has no lists of records: " + x);
+                yield List.of(new ZshCommand.For(List.of(name(x.item())), Optional.of(listWords(x.collection())), body(x.body())));
+            }
             case Statement.While x -> List.of(new ZshCommand.While(false, conditionList(x.condition()), body(x.body())));
-            case Statement.Break x -> List.of(cmd("break"));
-            case Statement.Continue x -> List.of(cmd("continue"));
+            case Statement.Finally x -> finallyBlock(x);
             case Statement.Function x -> List.of(function(x));
+            case Statement.NativeFunction x -> List.of(nativeFunction(x));
             case Statement.Return x -> return_(x);
             case Statement.Invoke x -> List.of(call(x.function(), x.arguments()));
             case Statement.Exit x -> List.of(cmd("exit", arg(text(x.status()))));
-            case Statement.Print x -> List.of(cmd("print", "-r", "--", colored(arg(text(x.message())), x.color())));
-            case Statement.Pause x -> {
-                List<ZshWordPart> prompt = new ArrayList<>(List.of(new ZshWordPart.Literal("?")));
-                prompt.addAll(text(x.message()));
-                yield List.of(cmd("read", "-r", arg(prompt)));
+            case Statement.Fail x -> {
+                usesFail = true;
+                yield List.of(cmd("koine_fail", arg(text(x.message()))));
             }
+            case Statement.Print x -> List.of(cmd("print", "-r", "--", arg(text(x.message()))));
             case Statement.Run x -> {
                 ZshCommand.Simple c = command(x.command());
                 yield List.of(x.onFailure() == Statement.OnFailure.ABORT ? either(c, cmd("exit", p("?"))) : c);
             }
             case Statement.EachLine x -> eachLine(x);
-            case Statement.Kill x -> List.of(cmd("kill", arg(text(x.process()))));
-            case Statement.Sleep x -> List.of(cmd("sleep", arg(text(x.seconds()))));
-            case Statement.MakeDirs x -> List.of(cmd("mkdir", "-p", arg(text(x.path()))));
             case Statement.Comment x -> List.of(comment(x.text()));
         });
     }
@@ -230,32 +274,48 @@ public final class ZshLowering {
         return rest.isEmpty() ? f : f.orElse(body(rest));
     }
 
-    /**
-     * Sets a variable. A choice sets it in each branch, a call copies it from {@code REPLY} or {@code reply}, a bool
-     * is set to 1 or 0 by its test.
-     */
+    /** Sets a variable. A call copies it from {@code REPLY} or {@code reply}, a bool is set to 1 or 0 by its test. */
     private List<ZshCommand> assign(String name, Type type, Expr value) {
-        if (value instanceof Expr.Choose c && !type.equals(Type.BOOL))
-            return List.of(new ZshCommand.If(List.of(new ZshCommand.Clause(conditionList(c.condition()),
-                    scoped(() -> assign(name, type, c.then())))), Optional.of(scoped(() -> assign(name, type, c.otherwise())))));
         if (value instanceof Expr.Call c && !type.equals(Type.BOOL)) {
             List<ZshCommand> out = new ArrayList<>(List.of(call(c.function(), c.arguments())));
-            out.addAll(switch (type) {
-                case Type.ListOf l -> List.of(assigns(new ZshAssignment(name, Optional.empty(), false, new ZshAssignment.Array(List.of(w(dq(p("reply", "@"))))))));
-                case Type.MapOf m -> mapAssign(name, List.of(w(dq(p("reply", "@")))));
-                default -> List.of(assigns(set(name, p("REPLY"))));
-            });
+            out.addAll(copy(name, type, type instanceof Type.ListOf ? "reply" : "REPLY"));
             return out;
         }
+        if (value instanceof Expr.Capture c) return List.of(capture(c, name));
         return switch (type) {
             case Type.Bool b -> switch (value) {
                 case Expr.BoolLit l -> List.of(assigns(set(name, l.value() ? "1" : "0")));
                 case Expr.Ref r -> List.of(assigns(set(name, p(name(r.var())))));
+                case Expr.FieldOf f -> List.of(assigns(set(name, p(recordName(f.record()) + "_" + f.field()))));
                 default -> List.of(either(both(check(value), assigns(set(name, "1"))), assigns(set(name, "0"))));
             };
             case Type.ListOf l -> List.of(assigns(new ZshAssignment(name, Optional.empty(), false, new ZshAssignment.Array(listWords(value)))));
             case Type.MapOf m -> mapAssign(name, mapWords(value));
+            case Type.Record r -> throw new IllegalStateException("a record is assigned field by field: " + value);
             default -> List.of(assigns(set(name, bareWord(text(value)))));
+        };
+    }
+
+    /** {@code name=$(cmd) || ...}: stopping exits with its status, a fallback is set instead, a message fails the script. */
+    private ZshCommand capture(Expr.Capture c, String name) {
+        ZshCommand set = assigns(set(name, new ZshWordPart.CommandSubstitution(List.of(command(c.command())))));
+        return switch (c.onFailure()) {
+            case Expr.Fallback.Stop x -> either(set, cmd("exit", p("?")));
+            case Expr.Fallback.Value x -> either(set, assigns(set(name, bareWord(text(x.value())))));
+            case Expr.Fallback.Fail x -> {
+                usesFail = true;
+                yield either(set, cmd("koine_fail", arg(text(x.message()))));
+            }
+        };
+    }
+
+    /** {@code target} set to what the variable {@code source} holds. */
+    private List<ZshCommand> copy(String target, Type type, String source) {
+        return switch (type) {
+            case Type.ListOf l -> List.of(assigns(new ZshAssignment(target, Optional.empty(), false,
+                    new ZshAssignment.Array(List.of(w(dq(p(source, "@"))))))));
+            case Type.MapOf m -> mapAssign(target, List.of(w(dq(param(source).flags("@kv").build()))));
+            default -> List.of(assigns(set(target, p(source))));
         };
     }
 
@@ -270,15 +330,90 @@ public final class ZshLowering {
         return map instanceof Expr.EmptyMap ? List.of() : List.of(w(dq(param(named(map)).flags("@kv").build())));
     }
 
+    /** Sets a record's variables, {@code prefix_field} for each field, from the value. */
+    private List<ZshCommand> assignRecord(String prefix, Type.Record r, Expr value) {
+        List<ZshCommand> out = new ArrayList<>();
+        switch (value) {
+            case Expr.Call c -> {
+                out.add(call(c.function(), c.arguments()));
+                for (Leaf l : leaves(r)) out.addAll(copy(prefix + l.suffix(), l.type(), "reply" + l.suffix()));
+            }
+            case Expr.MakeRecord m -> {
+                for (int i = 0; i < m.values().size(); i++) {
+                    Type.Record.Field f = r.fields().get(i);
+                    String n = prefix + "_" + f.name();
+                    out.addAll(f.type() instanceof Type.Record inner ? assignRecord(n, inner, m.values().get(i))
+                            : assign(n, f.type(), m.values().get(i)));
+                }
+            }
+            case Expr.ReadAs x -> {
+                ZshWord data = bareWord(text(x.data()));
+                for (Leaf l : leaves(r)) out.add(readLeaf(prefix + l.suffix(), l, data));
+            }
+            default -> {
+                String source = recordName(value);
+                if (!source.equals(prefix)) for (Leaf l : leaves(r)) out.addAll(copy(prefix + l.suffix(), l.type(), source + l.suffix()));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * One field of data, read with {@code jq}: a string that is null or missing as empty, a number as 0 unless it is
+     * one, a bool as false unless it is true, a list one item a line, blank ones dropped.
+     */
+    private static ZshCommand readLeaf(String target, Leaf l, ZshWord data) {
+        StringBuilder path = new StringBuilder();
+        for (String n : l.path())
+            // .a["b-c"] rather than .a.["b-c"], which jq 1.6 does not read
+            path.append(n.matches("[A-Za-z_][A-Za-z0-9_]*") ? "." + n
+                    : (path.isEmpty() ? "." : "") + "[\"" + n.replace("\\", "\\\\").replace("\"", "\\\"") + "\"]");
+        ZshRedirection from = hereString(data);
+        return switch (l.type()) {
+            case Type.Int i -> assigns(set(target, sub(cmd("jq", "-r", literalWord("(" + path + " | tonumber? | floor) // 0")).redirect(from))));
+            case Type.Bool b -> either(both(cmd("jq", "-e", literalWord(path + " == true")).redirect(to("/dev/null"), from),
+                    assigns(set(target, "1"))), assigns(set(target, "0")));
+            case Type.ListOf x when x.element().equals(Type.STRING) -> assigns(new ZshAssignment(target, Optional.empty(), false,
+                    new ZshAssignment.Array(List.of(w(param(dq(sub(cmd("jq", "-r", literalWord(path + "[]?")).redirect(from)))).flags("f").build())))));
+            case Type.Str s -> assigns(set(target, sub(cmd("jq", "-r", literalWord(path + " | values")).redirect(from))));
+            default -> throw new IllegalArgumentException("Zsh cannot read data as " + l.type());
+        };
+    }
+
+    /**
+     * The cleanup becomes a function, pushed onto {@code koine_cleanups} before the body and popped and run after it.
+     * It runs in the caller's scope, so it sees and sets the caller's variables; only its temporaries are its own.
+     */
+    private List<ZshCommand> finallyBlock(Statement.Finally x) {
+        String fname = "koine_cleanup_" + ++cleanups;
+        Map<String, Type> outerTemps = functionTemps;
+        functionTemps = new LinkedHashMap<>();
+        List<ZshCommand> cleanup = body(x.cleanup());
+        List<ZshCommand> all = new ArrayList<>(declarations(functionTemps));
+        all.addAll(cleanup);
+        functionTemps = outerTemps;
+        cleanupFunctions.add(new ZshCommand.Function(List.of(fname), false, group(all.toArray(ZshCommand[]::new))));
+
+        List<ZshCommand> out = new ArrayList<>();
+        out.add(assigns(appendArray("koine_cleanups", fname)));
+        for (Statement s : x.body()) out.addAll(statement(s));
+        out.add(cmd("shift", "-p", "koine_cleanups"));
+        out.add(cmd(fname));
+        return out;
+    }
+
     private ZshCommand function(Statement.Function x) {
         Map<String, Type> outerTemps = functionTemps;
         functionTemps = new LinkedHashMap<>();
         List<ZshCommand> b = body(x.body());
         List<ZshCommand> all = new ArrayList<>(List.of(cmd("emulate", "-L", "zsh")));
-        all.addAll(parameters(x.signature()));
+        all.addAll(prologue(x.signature(), false));
         Map<String, Type> locals = new LinkedHashMap<>();
         assigned(x.body(), locals);
-        x.signature().parameters().forEach(v -> locals.remove(name(v)));
+        for (Var v : x.signature().parameters()) {
+            if (v.type() instanceof Type.Record r) for (Leaf l : leaves(r)) locals.remove(name(v) + l.suffix());
+            else locals.remove(name(v));
+        }
         locals.putAll(functionTemps);
         all.addAll(declarations(locals));
         all.addAll(b);
@@ -286,35 +421,63 @@ public final class ZshLowering {
         return new ZshCommand.Function(List.of(x.signature().name()), false, group(all.toArray(ZshCommand[]::new)));
     }
 
-    /** {@code local name=$1 ...}; a list takes the rest of the arguments, so it can only be the last. */
-    private List<ZshCommand> parameters(FunctionSig sig) {
-        List<Object> scalars = new ArrayList<>(List.of("local"));
+    /** The prologue, then the body as it is. Its parameters keep the names they were written with. */
+    private ZshCommand nativeFunction(Statement.NativeFunction x) {
+        if (x.os() != OS.Mac) throw new IllegalArgumentException(x.signature().name() + " is native to " + x.os() + ", not Mac");
+        if (x.body().contains("koine_fail")) usesFail = true;
+        List<ZshCommand> all = new ArrayList<>(List.of(cmd("emulate", "-L", "zsh")));
+        all.addAll(prologue(x.signature(), true));
+        all.add(new ZshCommand.Raw(x.body()));
+        return new ZshCommand.Function(List.of(x.signature().name()), false, group(all.toArray(ZshCommand[]::new)));
+    }
+
+    /**
+     * {@code local a=$1 b=$2}: the parameters, unpacked in order. A list comes as its length then its items, so the
+     * arguments before it are shifted off first: {@code shift 2; local -a xs; xs=("${@[2,$1+1]}"); shift $(( $1 + 1 ))}.
+     * A native function's are {@code local -h}.
+     */
+    private static List<ZshCommand> prologue(FunctionSig sig, boolean written) {
         List<ZshCommand> out = new ArrayList<>();
-        for (int i = 0; i < sig.parameters().size(); i++) {
-            Var v = sig.parameters().get(i);
-            switch (v.type()) {
-                case Type.ListOf l -> {
-                    if (i != sig.parameters().size() - 1)
-                        throw new IllegalArgumentException(sig.name() + ": a list parameter takes the rest of the arguments, so it must be last");
-                    out.add(cmd("local", "-a", name(v)));
-                    out.add(assigns(new ZshAssignment(name(v), Optional.empty(), false,
-                            new ZshAssignment.Array(List.of(w(dq(p("@", (i + 1) + ",-1"))))))));
+        List<Object> local = written ? List.of("local", "-h") : List.of("local");
+        List<Object> scalars = new ArrayList<>(local);
+        List<Var> ps = sig.parameters();
+        for (int i = 0; i < ps.size(); i++) {
+            Var v = ps.get(i);
+            String n = written ? writtenName(v) : name(v);
+            List<Leaf> leaves = v.type() instanceof Type.Record r ? leaves(r) : List.of(new Leaf("", List.of(), v.type()));
+            for (int j = 0; j < leaves.size(); j++) {
+                Leaf l = leaves.get(j);
+                boolean last = i == ps.size() - 1 && j == leaves.size() - 1;
+                if (l.type() instanceof Type.MapOf) throw new IllegalArgumentException(sig.name() + ": Zsh cannot pass a map to a function");
+                if (l.type() instanceof Type.ListOf) {
+                    if (scalars.size() > local.size()) {
+                        out.add(cmd(scalars.toArray()));
+                        out.add(cmd("shift", Integer.toString(scalars.size() - local.size())));
+                        scalars = new ArrayList<>(local);
+                    }
+                    List<Object> declare = new ArrayList<>(local);
+                    declare.add("-a");
+                    declare.add(n + l.suffix());
+                    out.add(cmd(declare.toArray()));
+                    out.add(assigns(new ZshAssignment(n + l.suffix(), Optional.empty(), false,
+                            new ZshAssignment.Array(List.of(w(dq(p("@", "2,$1+1"))))))));
+                    if (!last) out.add(cmd("shift", w(new ZshWordPart.ArithmeticExpansion("$1 + 1"))));
+                } else {
+                    scalars.add(w(n + l.suffix() + "=", p(Integer.toString(scalars.size() - local.size() + 1))));
                 }
-                case Type.MapOf m -> throw new IllegalArgumentException(sig.name() + ": Zsh cannot pass a map to a function");
-                default -> scalars.add(w(name(v) + "=", p(String.valueOf(i + 1))));
             }
         }
-        if (scalars.size() > 1) out.addFirst(cmd(scalars.toArray()));
+        if (scalars.size() > local.size()) out.add(cmd(scalars.toArray()));
         return out;
     }
 
-    /** The variables a body sets, not counting those of the functions it defines. */
+    /** The variables a body sets, a record as its fields, not counting those of the functions it defines. */
     private static void assigned(List<Statement> body, Map<String, Type> out) {
         for (Statement s : body)
             switch (s) {
-                case Statement.Set x -> out.putIfAbsent(name(x.var()), x.var().type());
+                case Statement.Set x -> declare(x.var(), out);
                 case Statement.ForEach x -> {
-                    out.putIfAbsent(name(x.item()), x.item().type());
+                    declare(x.item(), out);
                     assigned(x.body(), out);
                 }
                 case Statement.If x -> {
@@ -322,14 +485,23 @@ public final class ZshLowering {
                     assigned(x.otherwise(), out);
                 }
                 case Statement.While x -> assigned(x.body(), out);
-                case Statement.EachLine x -> {
-                    out.putIfAbsent(name(x.line()), x.line().type());
+                case Statement.Finally x -> {
                     assigned(x.body(), out);
-                    out.putIfAbsent(name(x.status()), x.status().type());
+                    assigned(x.cleanup(), out);
+                }
+                case Statement.EachLine x -> {
+                    declare(x.line(), out);
+                    assigned(x.body(), out);
+                    declare(x.status(), out);
                 }
                 default -> {
                 }
             }
+    }
+
+    private static void declare(Var v, Map<String, Type> out) {
+        if (v.type() instanceof Type.Record r) for (Leaf l : leaves(r)) out.putIfAbsent(name(v) + l.suffix(), l.type());
+        else out.putIfAbsent(name(v), v.type());
     }
 
     /** {@code local a b}, {@code local -a xs}, {@code local -A m}. */
@@ -344,15 +516,17 @@ public final class ZshLowering {
         return out;
     }
 
-    /** A value goes back in {@code REPLY} or {@code reply}, a bool as the exit status. */
+    /** A value goes back in {@code REPLY}, {@code reply} or {@code reply_<field>}, a bool as the exit status. */
     private List<ZshCommand> return_(Statement.Return x) {
-        if (x.value().isEmpty()) return List.of(cmd("return"));
+        // at the script's level, return ends the script successfully
+        if (x.value().isEmpty()) return List.of(functionTemps == null ? cmd("exit", "0") : cmd("return"));
         Expr v = x.value().get();
         List<ZshCommand> out = new ArrayList<>(switch (v.type()) {
             case Type.Bool b when v instanceof Expr.BoolLit l -> List.<ZshCommand>of();
             case Type.Bool b -> List.of(check(v));
             case Type.ListOf l -> assign("reply", l, v);
-            case Type.MapOf m -> List.of(assigns(new ZshAssignment("reply", Optional.empty(), false, new ZshAssignment.Array(mapWords(v)))));
+            case Type.Record r -> assignRecord("reply", r, v);
+            case Type.MapOf m -> throw new IllegalArgumentException("a function cannot return a map: " + v);
             default -> assign("REPLY", v.type(), v);
         });
         out.add(v instanceof Expr.BoolLit l ? cmd("return", l.value() ? "0" : "1") : cmd("return"));
@@ -369,6 +543,48 @@ public final class ZshLowering {
                 assigns(set(name(x.status()), p("pipestatus", "1"))));
     }
 
+    // ---- records ------------------------------------------------------------------------------------------------
+
+    private static List<Leaf> leaves(Type.Record r) {
+        List<Leaf> out = new ArrayList<>();
+        leaves(r, "", List.of(), out);
+        return out;
+    }
+
+    private static void leaves(Type.Record r, String suffix, List<String> path, List<Leaf> out) {
+        for (Type.Record.Field f : r.fields()) {
+            List<String> p = new ArrayList<>(path);
+            p.add(f.name());
+            String s = suffix + "_" + f.name();
+            switch (f.type()) {
+                case Type.Record inner -> {
+                    if (f.optional())
+                        throw new IllegalArgumentException("Zsh cannot tell a missing record apart yet: " + r + "." + f.name());
+                    leaves(inner, s, p, out);
+                }
+                case Type.ListOf l when l.element() instanceof Type.Record || l.element() instanceof Type.ListOf ->
+                        throw new IllegalArgumentException("Zsh has no lists of records or lists yet: " + r + "." + f.name());
+                case Type.MapOf m -> throw new IllegalArgumentException("Zsh has no maps in records: " + r + "." + f.name());
+                default -> out.add(new Leaf(s, p, f.type()));
+            }
+        }
+    }
+
+    /** The name a record's variables start with: its variable's, a field's under it, or a temporary's. */
+    private String recordName(Expr e) {
+        return switch (e) {
+            case Expr.Ref r -> name(r.var());
+            case Expr.FieldOf f -> recordName(f.record()) + "_" + f.field();
+            default -> {
+                Type.Record r = (Type.Record) e.type();
+                String t = "koineTemp" + ++temporaries;
+                if (functionTemps != null) for (Leaf l : leaves(r)) functionTemps.put(t + l.suffix(), l.type());
+                setup.addAll(assignRecord(t, r, e));
+                yield t;
+            }
+        };
+    }
+
     // ---- commands -----------------------------------------------------------------------------------------------
 
     private ZshCommand.Simple command(Command c) {
@@ -382,61 +598,46 @@ public final class ZshLowering {
         return c.quiet() ? s.redirect(new ZshRedirection.ToFile(Optional.empty(), ZshRedirection.FileOperator.OUT_AND_ERR, w("/dev/null"))) : s;
     }
 
+    /** {@code f a b}: a list as its length then its items, a record as its fields, as the prologue unpacks them. */
     private ZshCommand.Simple call(FunctionSig f, List<Expr> arguments) {
         List<ZshWord> ws = new ArrayList<>(List.of(w(f.name())));
-        ws.addAll(callArguments(f, arguments));
+        for (Expr a : arguments)
+            switch (a.type()) {
+                case Type.ListOf l -> listArgument(a, ws);
+                case Type.MapOf m -> throw new IllegalArgumentException(f.name() + ": Zsh cannot pass a map to a function");
+                case Type.Record r -> {
+                    String n = recordName(a);
+                    for (Leaf l : leaves(r)) {
+                        if (l.type() instanceof Type.ListOf) {
+                            ws.add(w(length(n + l.suffix())));
+                            ws.add(w(dq(p(n + l.suffix(), "@"))));
+                        } else {
+                            ws.add(w(dq(p(n + l.suffix()))));
+                        }
+                    }
+                }
+                default -> ws.add(arg(text(a)));
+            }
         return new ZshCommand.Simple(List.of(), ws, List.of());
     }
 
-    private List<ZshWord> callArguments(FunctionSig f, List<Expr> arguments) {
-        List<ZshWord> out = new ArrayList<>();
-        for (Expr a : arguments)
-            switch (a.type()) {
-                case Type.ListOf l -> out.addAll(listWords(a));
-                case Type.MapOf m -> throw new IllegalArgumentException(f.name() + ": Zsh cannot pass a map to a function");
-                default -> out.add(arg(text(a)));
+    private void listArgument(Expr a, List<ZshWord> ws) {
+        switch (a) {
+            case Expr.ListLit l -> {
+                ws.add(w(Integer.toString(l.items().size())));
+                for (Expr i : l.items()) ws.add(arg(element(i)));
             }
-        return out;
-    }
-
-    /** {@code (cd dir && exec program args) > out 2> err &}; its process id is then {@code $!}. */
-    private ZshCommand spawn(Expr.Spawn s) {
-        ZshCommand.Simple c = command(s.command());
-        List<ZshWord> exec = new ArrayList<>(List.of(w("exec")));
-        exec.addAll(c.words());
-        ZshCommand inner = both(cmd("cd", arg(text(s.workDir()))), new ZshCommand.Simple(List.of(), exec, List.of()));
-        return new ZshCommand.Background(redirected(subshell(inner), to(arg(text(s.stdout()))), toFd(2, arg(text(s.stderr())))), false);
-    }
-
-    private static ZshWord colored(ZshWord message, Statement.Color color) {
-        if (color == Statement.Color.DEFAULT) return message;
-        String on = COLORS.get(color), off = "\u001b[0m";
-        if (message.parts().stream().allMatch(p -> p instanceof ZshWordPart.Literal || p instanceof ZshWordPart.SingleQuoted
-                || p instanceof ZshWordPart.AnsiC))
-            return w(ansi(on + literalText(message) + off));
-        List<ZshWordPart> parts = new ArrayList<>(List.of(ansi(on)));
-        for (ZshWordPart p : message.parts()) addMerging(parts, p);
-        addMerging(parts, ansi(off));
-        return new ZshWord(parts);
-    }
-
-    private static String literalText(ZshWord word) {
-        StringBuilder b = new StringBuilder();
-        for (ZshWordPart p : word.parts())
-            b.append(switch (p) {
-                case ZshWordPart.Literal l -> l.text();
-                case ZshWordPart.SingleQuoted q -> q.text();
-                case ZshWordPart.AnsiC a -> a.text();
-                default -> throw new IllegalStateException(p.toString());
-            });
-        return b.toString();
-    }
-
-    /** Adds a part, run together with an {@code $'...'} before it. */
-    private static void addMerging(List<ZshWordPart> parts, ZshWordPart p) {
-        if (p instanceof ZshWordPart.AnsiC a && !parts.isEmpty() && parts.getLast() instanceof ZshWordPart.AnsiC before)
-            parts.set(parts.size() - 1, ansi(before.text() + a.text()));
-        else parts.add(p);
+            case Expr.Keys k -> {
+                String map = named(k.map());
+                ws.add(w(length(map)));
+                ws.add(w(dq(param(map).flags("@k").build())));
+            }
+            default -> {
+                String list = named(a);
+                ws.add(w(length(list)));
+                ws.add(w(dq(p(list, "@"))));
+            }
+        }
     }
 
     // ---- conditions ---------------------------------------------------------------------------------------------
@@ -456,6 +657,7 @@ public final class ZshLowering {
         return switch (e) {
             case Expr.BoolLit b -> cmd(b.value() ? "true" : "false");
             case Expr.Ref r -> arith(name(r.var()));
+            case Expr.FieldOf f -> arith(recordName(f.record()) + "_" + f.field());
             case Expr.Not n -> switch (n.operand()) {
                 case Expr.IsEmpty x -> notEmpty(x.value());
                 case Expr.Compare c -> check(new Expr.Compare(c.left(), switch (c.op()) {
@@ -481,23 +683,21 @@ public final class ZshLowering {
                     } + " " + arithmetic(c.right()))
                     : binary(bareWord(text(c.left())), c.op() == Expr.Comparison.EQ ? ZshCondition.BinaryTest.MATCHES
                             : ZshCondition.BinaryTest.NOT_MATCHES, patternWord(text(c.right())));
-            case Expr.Choose c -> new ZshCommand.If(List.of(new ZshCommand.Clause(conditionList(c.condition()), conditionList(c.then()))),
-                    Optional.of(conditionList(c.otherwise())));
             case Expr.Matches m -> binary(bareWord(text(m.text())), ZshCondition.BinaryTest.REGEX, literalWord(m.pattern()));
-            case Expr.EndsWith x -> {
-                List<ZshWordPart> pattern = new ArrayList<>(List.of(glob("*")));
-                pattern.addAll(patternWord(text(x.suffix())).parts());
-                yield binary(bareWord(text(x.text())), ZshCondition.BinaryTest.MATCHES, new ZshWord(pattern));
+            case Expr.In x -> {
+                if (x.container().type().equals(Type.STRING)) {
+                    List<ZshWordPart> pattern = new ArrayList<>(List.of(glob("*")));
+                    pattern.addAll(patternWord(text(x.item())).parts());
+                    pattern.add(glob("*"));
+                    yield binary(bareWord(text(x.container())), ZshCondition.BinaryTest.MATCHES, new ZshWord(pattern));
+                }
+                // (Ie): the index of the item that is exactly this, or 0
+                yield arith(ZshPrinter.print(w(param(named(x.container())).subscript("(Ie)$" + named(x.item())).build())));
             }
             case Expr.HasKey h -> arith(ZshPrinter.print(w(param(named(h.map())).prefix(ZshParameter.Prefix.IS_SET)
                     .subscript(subscript(text(h.key()))).build())));
             case Expr.IsEmpty x -> isEmpty(x.value());
-            case Expr.Exists x -> unary(ZshCondition.UnaryTest.EXISTS, bareWord(text(x.path())));
-            case Expr.Field f -> jqTest(f, " == true");
             case Expr.Succeeds s -> command(s.command());
-            case Expr.CommandExists c -> cmd("whence", "-p", "--", arg(text(c.name()))).redirect(to("/dev/null"));
-            case Expr.IsRunning r -> cmd("kill", "-0", arg(text(r.process()))).redirect(toFd(2, "/dev/null"));
-            case Expr.IsInteractive i -> unary(ZshCondition.UnaryTest.TERMINAL, w("0"));
             case Expr.Call c -> call(c.function(), c.arguments());
             case Expr.At a -> arith(ZshPrinter.print(new ZshWord(text(a))));
             case Expr.Get g -> arith(ZshPrinter.print(new ZshWord(text(g))));
@@ -508,13 +708,8 @@ public final class ZshLowering {
     private ZshCommand isEmpty(Expr value) {
         return switch (value.type()) {
             case Type.Str s -> unary(ZshCondition.UnaryTest.EMPTY, bareWord(text(value)));
-            case Type.Json j when value instanceof Expr.Field f -> jqTest(f, " == null");
-            case Type.Json j -> {
-                ZshWord v = bareWord(text(value));
-                yield test(new ZshCondition.Or(new ZshCondition.Unary(ZshCondition.UnaryTest.EMPTY, v),
-                        new ZshCondition.Binary(v, ZshCondition.BinaryTest.MATCHES, w("null"))));
-            }
-            default -> arith(ZshPrinter.print(w(count(value))) + " == 0");
+            case Type.Record r -> throw new IllegalArgumentException("Zsh cannot tell a missing record apart yet: " + value);
+            default -> arith(ZshPrinter.print(w(length(named(value)))) + " == 0");
         };
     }
 
@@ -522,13 +717,8 @@ public final class ZshLowering {
     private ZshCommand notEmpty(Expr value) {
         return switch (value.type()) {
             case Type.Str s -> unary(ZshCondition.UnaryTest.NOT_EMPTY, bareWord(text(value)));
-            case Type.Json j when value instanceof Expr.Field f -> jqTest(f, " != null");
-            case Type.Json j -> {
-                ZshWord v = bareWord(text(value));
-                yield test(new ZshCondition.And(new ZshCondition.Unary(ZshCondition.UnaryTest.NOT_EMPTY, v),
-                        new ZshCondition.Binary(v, ZshCondition.BinaryTest.NOT_MATCHES, w("null"))));
-            }
-            default -> arith(ZshPrinter.print(w(count(value))) + " != 0");
+            case Type.Record r -> throw new IllegalArgumentException("Zsh cannot tell a missing record apart yet: " + value);
+            default -> arith(ZshPrinter.print(w(length(named(value)))) + " != 0");
         };
     }
 
@@ -588,51 +778,12 @@ public final class ZshLowering {
         return arithmetic;
     }
 
-    // ---- JSON ---------------------------------------------------------------------------------------------------
-
-    /**
-     * {@code jq option 'program'} on a JSON value: the file itself for a document read straight from one, else the
-     * text as a here-string. A field of a field is one path.
-     */
-    private ZshCommand.Simple jq(Expr json, List<String> path, String option, String rest) {
-        List<String> all = new ArrayList<>(path);
-        while (json instanceof Expr.Field f && f.type().equals(Type.JSON)) {
-            all.addAll(0, f.path());
-            json = f.json();
-        }
-        StringBuilder program = new StringBuilder();
-        for (String n : all)
-            // .a["b-c"] rather than .a.["b-c"], which jq 1.6 does not read
-            program.append(n.matches("[A-Za-z_][A-Za-z0-9_]*") ? "." + n
-                    : (program.isEmpty() ? "." : "") + "[\"" + n.replace("\\", "\\\\").replace("\"", "\\\"") + "\"]");
-        ZshWord filter = literalWord(program.append(rest).toString());
-        if (json instanceof Expr.ReadJson r) return cmd("jq", option, filter, arg(text(r.path())));
-        return cmd("jq", option, filter).redirect(hereString(bareWord(text(json))));
-    }
-
-    private ZshWordPart field(Expr.Field f) {
-        return sub(switch (f.type()) {
-            case Type.Str s -> jq(f.json(), f.path(), "-r", " // empty");
-            case Type.Int i -> jq(f.json(), f.path(), "-r", " // 0");
-            case Type.ListOf l -> jq(f.json(), f.path(), l.element().equals(Type.STRING) ? "-r" : "-c", "[]?");
-            default -> jq(f.json(), f.path(), "-c", " // empty");
-        });
-    }
-
-    /** {@code jq -e}, whose exit status says whether the field compares as given. */
-    private ZshCommand jqTest(Expr.Field f, String comparison) {
-        return jq(f.json(), f.path(), "-e", comparison).redirect(to("/dev/null"));
-    }
-
     // ---- values -------------------------------------------------------------------------------------------------
 
-    /**
-     * A string, number, bool, JSON value or process as word parts that double quotes can hold: literal text,
-     * parameters and command substitutions.
-     */
+    /** A string, number, bool or data as word parts that double quotes can hold: literal text and parameters. */
     private List<ZshWordPart> text(Expr e) {
-        if (e.type() instanceof Type.ListOf || e.type() instanceof Type.MapOf)
-            throw new IllegalArgumentException("a list or map is not text: " + e);
+        if (e.type() instanceof Type.ListOf || e.type() instanceof Type.MapOf || e.type() instanceof Type.Record)
+            throw new IllegalArgumentException("a list, a map or a record is not text: " + e);
         return switch (e) {
             case Expr.StringLit s -> s.value().isEmpty() ? List.of() : List.of(new ZshWordPart.Literal(s.value()));
             case Expr.IntLit i -> List.of(new ZshWordPart.Literal(Long.toString(i.value())));
@@ -643,40 +794,12 @@ public final class ZshLowering {
                 for (Expr p : i.parts()) out.addAll(text(p));
                 yield out;
             }
-            case Expr.Count c -> List.of(count(c.collection()));
             case Expr.At a -> List.of(param(named(a.list())).subscript(a.index() instanceof Expr.IntLit n
                     ? Long.toString(n.value() + 1) : arithmetic(a.index()) + "+1").build());
             case Expr.Get g -> List.of(param(named(g.map())).subscript(subscript(text(g.key()))).build());
-            case Expr.Choose c when !c.type().equals(Type.BOOL) -> List.of(p(temporary(c)));
-            case Expr.Take t -> List.of(take(text(t.text()), arithmetic(t.count())));
-            case Expr.Join j -> List.of(join(j));
-            case Expr.ScriptDir d -> List.of(scriptDir());
-            case Expr.ScriptPath p -> List.of(scriptDir(), new ZshWordPart.Literal("/" + p.name() + ".zsh"));
-            case Expr.Home h -> List.of(p("HOME"));
-            case Expr.Env v -> {
-                if (!v.name().matches("[A-Za-z_][A-Za-z0-9_]*"))
-                    throw new IllegalArgumentException("not a name Zsh can read: " + v.name());
-                yield List.of(p(v.name()));
-            }
-            case Expr.PathJoin p -> {
-                List<ZshWordPart> out = new ArrayList<>(text(p.base()));
-                for (Expr part : p.parts()) {
-                    out.add(new ZshWordPart.Literal("/"));
-                    out.addAll(text(part));
-                }
-                yield out;
-            }
-            case Expr.Parent p -> List.of(modify(text(p.path()), "h"));
-            case Expr.FileName f -> List.of(modify(text(f.path()), "t"));
-            case Expr.FullPath f -> List.of(modify(text(f.path()), "A"));
-            case Expr.ReadJson r -> List.of(readFile(r.path()));
-            case Expr.Field f when !f.type().equals(Type.BOOL) -> List.of(field(f));
-            case Expr.Capture c -> List.of(new ZshWordPart.CommandSubstitution(List.of(command(c.command()))));
-            case Expr.Spawn s -> {
-                setup.add(spawn(s));
-                yield List.of(p("!"));
-            }
+            case Expr.FieldOf f -> List.of(p(recordName(f.record()) + "_" + f.field()));
             case Expr.Call c when !c.type().equals(Type.BOOL) -> List.of(p(temporary(c)));
+            case Expr.Capture c -> List.of(p(temporary(c)));
             // a bool from a test: 1 or 0, through a temporary
             default -> List.of(p(temporary(e)));
         };
@@ -689,72 +812,13 @@ public final class ZshLowering {
         return text(e);
     }
 
-    /** A list as the words it spreads into: {@code "${xs[@]}"}, {@code ${=line}}, {@code ${(f)"$(...)"}}. */
+    /** A list as the words it spreads into: {@code "${xs[@]}"}, the items of a literal, a map's keys. */
     private List<ZshWord> listWords(Expr e) {
         return switch (e) {
             case Expr.ListLit l -> l.items().stream().map(i -> arg(element(i))).toList();
             case Expr.Keys k -> List.of(w(dq(param(named(k.map())).flags("@k").build())));
-            case Expr.Words t -> List.of(w(param(named(t.text())).prefix(ZshParameter.Prefix.SPLIT).build()));
-            case Expr.Field f -> List.of(w(param(dq(field(f))).flags("f").build()));
-            case Expr.ReadLines r -> List.of(w(param(dq(readFile(r.path()))).flags("f").build()));
             default -> List.of(w(dq(p(named(e), "@"))));
         };
-    }
-
-    private ZshWordPart readFile(Expr path) {
-        return sub(new ZshCommand.Simple(List.of(), List.of(),
-                List.of(new ZshRedirection.ToFile(Optional.empty(), ZshRedirection.FileOperator.IN, bareWord(text(path))))));
-    }
-
-    /** {@code ${#xs}}: a list's items, a map's entries. */
-    private ZshParameter count(Expr collection) {
-        if (collection instanceof Expr.Keys k) return length(named(k.map()));
-        return length(collection.type() instanceof Type.MapOf ? named(collection) : named(collection));
-    }
-
-    private ZshParameter join(Expr.Join j) {
-        String flag;
-        if (j.separator() instanceof Expr.StringLit s && s.value().equals("\n")) flag = "F";
-        else if (j.separator() instanceof Expr.StringLit s && s.value().chars().noneMatch(c -> c < 0x20)) {
-            String d = ":/|.,;@!#%+=~".chars().mapToObj(c -> String.valueOf((char) c))
-                    .filter(c -> !s.value().contains(c)).findFirst().orElseThrow();
-            flag = "j" + d + s.value() + d;
-        } else flag = "pj:$" + named(j.separator()) + ":";
-        // keys straight from the map, with @ so that they stay apart inside double quotes
-        return (j.list() instanceof Expr.Keys k ? param(param(named(k.map())).flags("@k").build()) : param(named(j.list())))
-                .flags(flag).build();
-    }
-
-    /** A modifier on a value: on the parameter itself where it is one, else on {@code ${:-value}}, as {@code ${${:-$dist/x}:h}}. */
-    private static ZshParameter modify(List<ZshWordPart> value, String modifier) {
-        if (value.size() == 1 && value.getFirst() instanceof ZshParameter p
-                && p.flags().isEmpty() && p.prefixes().isEmpty() && p.operation().isEmpty()) {
-            List<String> modifiers = new ArrayList<>(p.modifiers());
-            modifiers.add(modifier);
-            return new ZshParameter(List.of(), List.of(), p.target(), p.subscript(), modifiers, Optional.empty());
-        }
-        return param(defaulted(value)).modifiers(modifier).build();
-    }
-
-    /** The first {@code count} characters: {@code ${x:0:count}}. */
-    private static ZshParameter take(List<ZshWordPart> value, String count) {
-        ZshParameter.Substring first = new ZshParameter.Substring("0", Optional.of(count));
-        if (value.size() == 1 && value.getFirst() instanceof ZshParameter p
-                && p.flags().isEmpty() && p.prefixes().isEmpty() && p.operation().isEmpty() && p.modifiers().isEmpty())
-            return new ZshParameter(List.of(), List.of(), p.target(), p.subscript(), List.of(), Optional.of(first));
-        return param(defaulted(value)).operation(first).build();
-    }
-
-    /** {@code ${:-value}}: any value, as a parameter that others can nest. */
-    private static ZshParameter defaulted(List<ZshWordPart> value) {
-        return param("").operation(new ZshParameter.Default(true, ZshParameter.DefaultKind.USE_DEFAULT, new ZshWord(value))).build();
-    }
-
-    /** The directory of the script: {@code $0} names a function inside one, where {@code %x} still names the file. */
-    private ZshParameter scriptDir() {
-        if (functionTemps == null) return modified("0", "A", "h");
-        return param(param("").flags("%").operation(new ZshParameter.Default(true, ZshParameter.DefaultKind.USE_DEFAULT, w("%x"))).build())
-                .modifiers("A", "h").build();
     }
 
     /** An int in arithmetic syntax: a variable by its bare name. */
@@ -762,6 +826,7 @@ public final class ZshLowering {
         return switch (e) {
             case Expr.IntLit i -> Long.toString(i.value());
             case Expr.Ref r -> name(r.var());
+            case Expr.FieldOf f -> recordName(f.record()) + "_" + f.field();
             default -> ZshPrinter.print(new ZshWord(text(e)));
         };
     }
@@ -775,6 +840,25 @@ public final class ZshLowering {
         return ZshPrinter.print(new ZshWord(key));
     }
 
+    private static String literalText(ZshWord word) {
+        StringBuilder b = new StringBuilder();
+        for (ZshWordPart p : word.parts())
+            b.append(switch (p) {
+                case ZshWordPart.Literal l -> l.text();
+                case ZshWordPart.SingleQuoted q -> q.text();
+                case ZshWordPart.AnsiC a -> a.text();
+                default -> throw new IllegalStateException(p.toString());
+            });
+        return b.toString();
+    }
+
+    /** Adds a part, run together with an {@code $'...'} before it. */
+    private static void addMerging(List<ZshWordPart> parts, ZshWordPart p) {
+        if (p instanceof ZshWordPart.AnsiC a && !parts.isEmpty() && parts.getLast() instanceof ZshWordPart.AnsiC before)
+            parts.set(parts.size() - 1, ansi(before.text() + a.text()));
+        else parts.add(p);
+    }
+
     // ---- temporaries --------------------------------------------------------------------------------------------
 
     /** A variable set, before the command that needs it, to the value of an expression. */
@@ -785,9 +869,11 @@ public final class ZshLowering {
         return name;
     }
 
-    /** A variable that holds the value: the one it is read from, or a temporary. */
+    /** A variable that holds the value: the one it is read from, a record's field, or a temporary. */
     private String named(Expr e) {
-        return e instanceof Expr.Ref r ? name(r.var()) : temporary(e);
+        if (e instanceof Expr.Ref r) return name(r.var());
+        if (e instanceof Expr.FieldOf f) return recordName(f.record()) + "_" + f.field();
+        return temporary(e);
     }
 
     // ---- words --------------------------------------------------------------------------------------------------
@@ -849,6 +935,12 @@ public final class ZshLowering {
     private static String name(Var v) {
         if (!v.name().matches("[A-Za-z_][A-Za-z0-9_]*")) throw new IllegalArgumentException("not a name Zsh can use: " + v.name());
         return RESERVED.contains(v.name()) ? v.name() + "_" : v.name();
+    }
+
+    /** A native function's parameter, by the name its body uses. */
+    private static String writtenName(Var v) {
+        if (!v.name().matches("[A-Za-z_][A-Za-z0-9_]*")) throw new IllegalArgumentException("not a name Zsh can use: " + v.name());
+        return v.name();
     }
 
     /** {@code SkipBuild} as the option {@code skip-build}. */

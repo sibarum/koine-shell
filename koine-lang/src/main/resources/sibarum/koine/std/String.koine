@@ -24,7 +24,7 @@ def take(text: String, count: Number): String
 # The text split at runs of whitespace, with none at either end.
 def words(text: String): [String]
   native Windows
-    return ,@(-split $text)
+    return @(-split $text)
   native Linux
     read -r -d '' -a reply <<< "$text" || true
   native Mac

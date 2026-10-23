@@ -241,8 +241,9 @@ does not capture becomes part of its result. These rules make functions safe on 
    result is `return`.
 2. **Results come back through one fixed variable.** The function sets it just before it returns, and the caller copies
    it at once. Zsh already has this convention in `REPLY` and `reply`, and Bash uses the same names. Copying at once
-   keeps recursion working, and it needs nothing newer than Bash 3.2. PowerShell returns normally, with
-   `return ,$value` for a list, and the compiler puts `$null =` in front of every other line that would produce output.
+   keeps recursion working, and it needs nothing newer than Bash 3.2. PowerShell returns normally; it unrolls a
+   returned list into nothing, one value or an array, so the caller puts `@()` round a call that returns a list, and
+   the compiler puts `$null =` in front of every other line that would produce output.
 
    ```
    # Bash
@@ -355,7 +356,7 @@ What a native body can rely on:
 | | PowerShell | Bash, Zsh |
 |---|---|---|
 | Parameters | `$name`, typed: `[string]`, `[long]`, `[bool]`, `[string[]]`, or the record's object. Avoid PowerShell's automatic variables, such as `$home`, `$input` or `$args`. | Locals named after the parameters, unpacked by a prologue the compiler writes. Lists are arrays (from 1 in Zsh); a `Bool` is 0 or 1; a record parameter `p` is one local per field, `p_id`, `p_log`. Zsh's are `local -h`, so `path` is safe. |
-| A `String`, `Number` or list result | `return $value`, `return ,$list` | Set `REPLY`, or the array `reply` |
+| A `String`, `Number` or list result | `return $value`; a list as it is, `return $list`, since the caller puts `@()` round the call to undo PowerShell unrolling it | Set `REPLY`, or the array `reply` |
 | A `Bool` result | `return $true` | The exit status: 0 for true |
 | A record result | `return [pscustomobject]@{ … }` | Set `reply_<field>` for each field, `reply_branch_name` for a nested one |
 | Failing | `koine_fail 'message'` | `koine_fail 'message'` |

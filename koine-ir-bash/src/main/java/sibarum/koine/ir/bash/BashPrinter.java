@@ -294,6 +294,14 @@ public final class BashPrinter {
                     write(ls[i].isEmpty() ? "#" : "# " + ls[i]);
                 }
             }
+            case Raw r -> {
+                requireLines(c);
+                String[] ls = r.text().split("\n", -1);
+                for (int i = 0; i < ls.length; i++) {
+                    if (i > 0) newline();
+                    write(ls[i]);
+                }
+            }
             case Blank b -> requireLines(c);
         }
     }

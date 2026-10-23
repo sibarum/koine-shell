@@ -28,5 +28,12 @@
             <groupId>sibarum.koine</groupId>
             <artifactId>koine-ir-zsh</artifactId>
         </dependency>
+        <!-- The tests build their native functions from the standard library's modules. -->
+        <dependency>
+            <groupId>sibarum.koine</groupId>
+            <artifactId>koine-lang</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 </project>

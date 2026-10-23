@@ -1,0 +1,30 @@
+map: 2 1
+has b: yes
+words: b a,b,c
+take: abc ab
+comment: yes
+same case: no
+in string: yes
+in list: yes
+not in list: yes
+lists: [] [x,y]
+both: a b, c | d
+record: here at 3
+moved: 7 here
+big: yes
+data: probe 3 a+b
+on: yes
+path: c.txt b
+exists: yes
+probe git: yes
+failing git: no
+missing program: no
+lines: 1 status 0
+capture: git version
+failed capture: fallback
+while: 3
+in the body
+cleaned up
+warned
+on purpose
+cleaned up after the failure

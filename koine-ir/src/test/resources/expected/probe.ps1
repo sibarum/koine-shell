@@ -2,10 +2,10 @@
 .SYNOPSIS
   Tries each portable construct.
 
-.PARAMETER Json
+.PARAMETER json
   A JSON file to read.
 #>
-param([string]$Json)
+param([string]$json)
 $ErrorActionPreference = 'Stop'
 # PowerShell 7.3 and later: pass programs' arguments, and leave their exit statuses, as Windows PowerShell does.
 $PSNativeCommandArgumentPassing = 'Legacy'
@@ -25,38 +25,132 @@ function Test-Succeeds([string]$Program, [object[]]$Arguments = @(), [switch]$Qu
     $LASTEXITCODE -eq 0
 }
 
-$m = [System.Collections.Specialized.OrderedDictionary]::new()
-$m['B'] = '1'
-$m['b'] = '2'
-Write-Host "map: $($m.Count) $(@($m.Keys) -join ',')"
-$words = @(-split '  a  b c ')
-Write-Host "words: $($words.Count) $($words[1])"
-Write-Host "take: $('abcdef'.Substring(0, [Math]::Min(3, 'abcdef'.Length))) $('ab'.Substring(0, [Math]::Min(9, 'ab'.Length)))"
-Write-Host "match: $(if ('  # x' -cmatch '^[\s]*(#|\z)') { 'comment' } else { 'code' })"
-Write-Host "case: $(if ('A' -ceq 'a') { 'same' } else { 'different' })"
+# Fails the script: the message in red, with the step it is in, then exit, which runs every finally.
+function koine_fail([string]$Message) {
+    if ($script:KoineStep) { $Message = "$script:KoineStep failed: $Message" }
+    Write-Host $Message -ForegroundColor Red
+    exit 1
+}
+
+# Data read as a record: only the record's fields, a missing one as empty, and every list an array.
+function koine_as_Doc($Value) {
+    if ($null -eq $Value) { return $null }
+    [pscustomobject]@{ name = [string]$Value.name; count = [long]$Value.count; on = [bool]$Value.on; tags = @(foreach ($koineItem in $Value.tags) {
+        [string]$koineItem
+    }) }
+}
+
+function String_words([string]$text) {
+    return @(-split $text)
+}
+
+function String_take([string]$text, [long]$count) {
+    return $text.Substring(0, [Math]::Min($count, $text.Length))
+}
+
+function List_join([string[]]$items, [string]$separator) {
+    return ($items -join $separator)
+}
+
+function Path_join([string[]]$parts) {
+    $joined = $parts[0]
+    for ($i = 1; $i -lt $parts.Count; $i++) { $joined = Join-Path $joined $parts[$i] }
+    return $joined
+}
+
+function Path_parent([string]$path) {
+    return (Split-Path -Path $path -Parent)
+}
+
+function Path_name([string]$path) {
+    return (Split-Path -Path $path -Leaf)
+}
+
+function File_exists([string]$path) {
+    return (Test-Path -LiteralPath $path)
+}
+
+function Number_text([long]$number) {
+    return [string]$number
+}
+
+function Json_read([string]$path) {
+    return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json)
+}
+
+function Console_warn([string]$message) {
+    Write-Host $message -ForegroundColor Yellow
+}
 
 function Get-None { return @() }
 
-function Get-One { return @('x') }
-
 function Get-Two { return @('x', 'y') }
 
-Write-Host "none $(@(Get-None).Count), one $(@(Get-One).Count), two $(@(Get-Two).Count)"
-$doc = Get-Content -LiteralPath $Json -Raw | ConvertFrom-Json
-$ids = @()
-foreach ($item in $doc.items) { $ids += [string]$item.id }
-foreach ($item in $doc.missing.items) { $ids += 'never' }
-Write-Host "json: $($doc.name) [$($doc.nothing)] $($ids -join ' ')"
-Write-Host "missing field empty: $(if ($null -eq $doc.linux) { 'True' } else { 'False' })"
-Write-Host "probe git: $(if (Test-Succeeds 'git' @('--version') -Quiet) { 'True' } else { 'False' })"
-Write-Host "failing git: $(if (Test-Succeeds 'git' @('no-such-subcommand') -Quiet) { 'True' } else { 'False' })"
-Write-Host "missing program: $(if (Test-Succeeds 'no-such-program-koine' -Quiet) { 'True' } else { 'False' })"
+function Join-Both($xs, $sep, $ys) { return "$(List_join $xs $sep) | $(List_join $ys $sep)" }
+
+function Describe-Point($p) { return "$($p.label) at $(Number_text $p.x)" }
+
+function Move-Point($p, $by) { return [pscustomobject]@{ x = $by; label = $p.label } }
+
+function Test-Big($n) { return $n -gt 2 }
+
+$m = [System.Collections.Specialized.OrderedDictionary]::new()
+$m['B'] = '1'
+$m['b'] = '2'
+Write-Host "map: $($m['b']) $($m['B'])"
+if ($m.Contains('b')) { Write-Host 'has b: yes' } else { Write-Host 'has b: no' }
+$words = @(String_words '  a  b c ')
+Write-Host "words: $($words[1]) $(List_join $words ',')"
+Write-Host "take: $(String_take 'abcdef' 3) $(String_take 'ab' 9)"
+if ('  # x' -cmatch '^[\s]*(#|\z)') { Write-Host 'comment: yes' } else { Write-Host 'comment: no' }
+if ('A' -ceq 'a') { Write-Host 'same case: yes' } else { Write-Host 'same case: no' }
+if ('abc'.Contains('b')) { Write-Host 'in string: yes' } else { Write-Host 'in string: no' }
+if ($words -ccontains 'c') { Write-Host 'in list: yes' } else { Write-Host 'in list: no' }
+if (-not ($words -ccontains 'z')) { Write-Host 'not in list: yes' } else { Write-Host 'not in list: no' }
+Write-Host "lists: [$(List_join @(Get-None) ',')] [$(List_join @(Get-Two) ',')]"
+Write-Host "both: $(Join-Both @('a b', 'c') ', ' @('d'))"
+$p = [pscustomobject]@{ x = 3; label = 'here' }
+Write-Host "record: $(Describe-Point $p)"
+$q = Move-Point $p 7
+Write-Host "moved: $(Number_text $q.x) $($q.label)"
+if (Test-Big 3) { Write-Host 'big: yes' } else { Write-Host 'big: no' }
+$doc = koine_as_Doc (Json_read $json)
+Write-Host "data: $($doc.name) $(Number_text $doc.count) $(List_join $doc.tags '+')"
+if ($doc.on) { Write-Host 'on: yes' } else { Write-Host 'on: no' }
+Write-Host "path: $(Path_name (Path_join @('a', 'b', 'c.txt'))) $(Path_name (Path_parent (Path_join @('a', 'b', 'c.txt'))))"
+if (File_exists $json) { Write-Host 'exists: yes' } else { Write-Host 'exists: no' }
+if (Test-Succeeds 'git' @('--version') -Quiet) { Write-Host 'probe git: yes' } else { Write-Host 'probe git: no' }
+if (Test-Succeeds 'git' @('no-such-subcommand') -Quiet) {
+    Write-Host 'failing git: yes'
+} else {
+    Write-Host 'failing git: no'
+}
+if (Test-Succeeds 'no-such-program-koine' -Quiet) {
+    Write-Host 'missing program: yes'
+} else {
+    Write-Host 'missing program: no'
+}
 $lines = 0
 git --version | ForEach-Object { $line = $_; $lines = 1 }
 $status = $LASTEXITCODE
 Write-Host "lines: $lines status $status"
-$version = (git --version) -join "`n"
-Write-Host "capture: $($version.Substring(0, [Math]::Min(11, $version.Length)))"
-Write-Host "path: $(Split-Path (Join-Path (Join-Path 'a' b) c.txt) -Leaf) $(Split-Path (Split-Path (Join-Path (Join-Path 'a' b) c.txt) -Parent) -Leaf)"
-Write-Host "interp: $($ids.Count) items, $(@($m.Keys).Count) keys"
-exit 7
+$version = $($koineTemp1 = (git --version) -join "`n"; if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+} else {
+    $koineTemp1
+})
+Write-Host "capture: $(String_take $version 11)"
+$other = $($koineTemp2 = (git config --get koine.no-such-key) -join "`n"; if ($LASTEXITCODE -ne 0) {
+    'fallback'
+} else {
+    $koineTemp2
+})
+Write-Host "failed capture: $other"
+$n = 0
+while ($n -lt 3) { $n = 3 }
+Write-Host "while: $n"
+try { Write-Host 'in the body' } finally { Write-Host 'cleaned up' }
+Console_warn 'warned'
+if (-not (Test-Succeeds 'git' @('--version') -Quiet)) { exit 1 }
+try { koine_fail 'on purpose' } finally { Write-Host 'cleaned up after the failure' }
+Write-Host 'never'

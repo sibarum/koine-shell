@@ -179,6 +179,10 @@ public sealed interface BashCommand {
     record Comment(String text) implements BashCommand {
     }
 
+    /** Lines of Bash written by hand, such as a native body: each printed as it is, at the block's indentation. */
+    record Raw(String text) implements BashCommand {
+    }
+
     /** An empty line. */
     record Blank() implements BashCommand {
     }
