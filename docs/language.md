@@ -309,6 +309,9 @@ def find: String
   return String.empty
 ```
 
+The standard library's `Python.find` is native after all: probing this way shows each `--version`, and the Microsoft
+Store's stub complaining on stderr, and Koine has no way to silence a command (open question 3).
+
 ```
 module Clock
 
@@ -804,7 +807,8 @@ script Preflight<Windows>(skipBuild = false, seconds = 8, buildOnly = false)
    return a record, and functions are shared between scripts as a module next to them. What is still open: whether a
    function can return a map.
 3. **Plumbing.** Pipes and redirects are not allowed inside backticks. Writing output to a file will eventually need a
-   keyword or a library member.
+   keyword or a library member. So will discarding it: a probe such as `Python.find`'s, which wants only the exit
+   status, is native for now. The IR's commands can already be quiet; only the syntax is missing.
 4. **What happens to the portable IR.** It could become this language's target, or be replaced by something much
    smaller. Listing what the preflight example actually needs from it would answer this.
 5. **Capturing without failing: settled.** `else` after a capture gives a value, or `fail` with a message, if the

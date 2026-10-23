@@ -1,9 +1,23 @@
 module Python
 
-# A Python that answers --version: on Windows, the Store's python.exe stub is on the path but runs nothing.
+# A Python that answers --version: on Windows, the Store's python.exe stub is on the path but runs nothing. The
+# probing is quiet, since the stub's complaint on stderr would read as a fault, and Koine cannot silence a command.
 def find: String
-  let home = Home.directory
-  for candidate in ['python', 'py', Path.join(home, 'anaconda3', 'python.exe'), Path.join(home, 'miniconda3', 'python.exe')]
-    if try {}`{candidate} --version`
-      return candidate
-  return String.empty
+  native Windows
+    foreach ($candidate in @('python', 'py', (Join-Path $HOME 'anaconda3\python.exe'), (Join-Path $HOME 'miniconda3\python.exe'))) {
+        if (-not (Get-Command $candidate -ErrorAction SilentlyContinue)) { continue }
+        $ErrorActionPreference = 'Continue'
+        $global:LASTEXITCODE = 0
+        try { & $candidate --version *> $null } catch { continue }
+        if ($LASTEXITCODE -eq 0) { return $candidate }
+    }
+    return ''
+  native Linux, Mac
+    local candidate
+    REPLY=
+    for candidate in python py "$HOME/anaconda3/python.exe" "$HOME/miniconda3/python.exe"; do
+      if command -v -- "$candidate" >/dev/null 2>&1 && "$candidate" --version >/dev/null 2>&1; then
+        REPLY=$candidate
+        return 0
+      fi
+    done

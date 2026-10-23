@@ -13,7 +13,7 @@ import static sibarum.koine.ir.Type.*;
 /**
  * {@code koine-lang/src/test/resources/examples/preflight.koine}, built in the IR by hand, the way the compiler will:
  * for Windows only, as its script line says; every library member it uses, directly or through others, as a native
- * function from the standard library, or a Koine one for {@code Python.find}; {@code step} and {@code within}
+ * function from the standard library; {@code step} and {@code within}
  * expanded from {@code Script.runStep} and {@code Dir.runIn}; and each JSON file read into its record.
  */
 final class Preflight {
@@ -76,13 +76,10 @@ final class Preflight {
     static final Var CHECKOUT = new Var("checkout", STRING);
     static final Var HEAD = new Var("head", STRING);
 
-    static final Var HOME = new Var("home", STRING);
-    static final Var CANDIDATE = new Var("candidate", STRING);
-
     // ---- functions ----------------------------------------------------------------------------------------------
 
     /**
-     * Every native member preflight uses, directly or through Python.find and the expanded steps, in the order the
+     * Every native member preflight uses, directly or through the expanded steps, in the order the
      * compiler meets them: the order they are first used in, reading the script from the top.
      */
     static final List<String[]> NATIVES = List.of(
@@ -91,10 +88,9 @@ final class Preflight {
             m("String", "endsWith"), m("File", "exists"), m("Dir", "push"), m("Process", "start"), m("Clock", "sleep"),
             m("Process", "running"), m("Process", "stop"), m("Number", "text"), m("Dir", "pop"), m("Console", "error"),
             m("File", "lines"), m("String", "words"), m("String", "take"), m("Path", "name"), m("Console", "warn"),
-            m("Console", "interactive"), m("Console", "pause"), m("List", "join"), m("Home", "directory"),
-            m("String", "empty"), m("Console", "success"), m("Script", "sibling"));
+            m("Console", "interactive"), m("Console", "pause"), m("List", "join"), m("Python", "find"),
+            m("Console", "success"), m("String", "empty"), m("Script", "sibling"));
 
-    static final FunctionSig PYTHON_FIND = new FunctionSig("Python_find", List.of(), Optional.of(STRING));
     static final FunctionSig LINUX_BUILD_PROBLEMS = new FunctionSig("linuxBuildProblems", List.of(LOGS, ROOT, CONFIGS),
             Optional.of(listOf(STRING)));
 
@@ -103,7 +99,6 @@ final class Preflight {
     static Script script() {
         List<Statement> body = new ArrayList<>();
         for (String[] n : NATIVES) body.add(Std.native_(n[0], n[1], OS_));
-        body.add(pythonFind());
         body.add(linuxBuildProblems());
         body.addAll(body(
                 set(DIST, call("Script", "directory")),
@@ -120,7 +115,7 @@ final class Preflight {
                         + "checkout it built. They are fit to publish only while every one of those is still checked out."),
                 step("Linux", linux()),
                 step("Notices", body(
-                        set(PYTHON, new Call(PYTHON_FIND, List.of())),
+                        set(PYTHON, call("Python", "find")),
                         when(new IsEmpty(ref(PYTHON)), fail("No Python found (python, py, or anaconda3)")),
                         set(NOTICES, path(ref(DIST), s("notices"), s("notices.py"))),
                         when(new Not(new Succeeds(new Command(ref(PYTHON), List.of(ref(NOTICES), s("--check")), false))),
@@ -257,15 +252,6 @@ final class Preflight {
                 new Return(Optional.of(ref(PROBLEMS)))));
     }
 
-    /** The standard library's Python.find, which is Koine, as the compiler will emit it. */
-    private static Function pythonFind() {
-        return new Function(PYTHON_FIND, body(
-                set(HOME, call("Home", "directory")),
-                forEach(CANDIDATE, new ListLit(STRING, List.of(s("python"), s("py"),
-                                path(ref(HOME), s("anaconda3"), s("python.exe")), path(ref(HOME), s("miniconda3"), s("python.exe")))),
-                        when(new Succeeds(new Command(ref(CANDIDATE), List.of(s("--version")), false)), new Return(Optional.of(ref(CANDIDATE))))),
-                new Return(Optional.of(call("String", "empty")))));
-    }
 
     // ---- what the compiler will expand --------------------------------------------------------------------------
 

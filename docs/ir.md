@@ -105,8 +105,9 @@ status for a `Bool`; the caller copies it at once. Koine functions use the same 
 
 - **Preflight** is built in the IR by hand in `koine-ir/src/test/java/sibarum/koine/ir/Preflight.java`, as the
   compiler will build it: Windows only, every native function taken from the standard library's files, `step` and
-  `within` expanded. It lowers to `expected/preflight.ps1`, which Windows PowerShell 5.1 parses without errors. It has
-  not been run: running it builds the whole stack and starts every application, which is step 5.
+  `within` expanded. It lowers to `expected/preflight.ps1`, which Windows PowerShell 5.1 parses without errors. Its
+  compiled twin has since been run for real beside the original; see the museum's plaque,
+  [`museum/preflight`](../museum/preflight/README.md#run-side-by-side).
 - **The probe** (`Probe.java`) is one script of every construct, built for each OS from that OS's native bodies. Its
   PowerShell and Bash outputs were run, and print the same lines, those in `expected/probe.out`. The Bash run left out
   reading data, since this machine's Git Bash has no `jq`. Running it caught a real fault: a native body that returned

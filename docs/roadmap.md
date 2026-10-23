@@ -60,8 +60,9 @@ the native code. The first use is deployment and installer scripts; a REPL comes
    and `native` for the OS, emits the library members a script uses in the order it first uses them, expands members
    that take a block, `within` and `step` among them, and reads data into records. `preflight.koine` compiles to
    exactly the IR `Preflight.java` in `koine-ir`'s tests builds by hand. A smaller script, `hello.koine` in its tests,
-   compiled for Windows and for Linux, runs and prints the same on PowerShell and Bash. *Still to do:* run the
-   compiled `preflight.ps1` for real, and compare it with the original.
+   compiled for Windows and for Linux, runs and prints the same on PowerShell and Bash. *Run:* the compiled
+   `preflight.ps1` ran for real beside the original, and did the same: the same steps, exit statuses and generated
+   files. The differences are listed on [the museum's plaque](../museum/preflight/README.md#conservation-notes).
 6. **Port a real installer as a bootstrap script.** This is the milestone.
 
 ## After that

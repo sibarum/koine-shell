@@ -63,8 +63,28 @@ The compiled successor is not a replica. Where it differs:
 - **Messages:** `PREFLIGHT FAILED: the build` becomes `Build failed: …`, with the step's name. The paths in messages
   are written with `/`.
 - **Help:** the three parameters lose their help text. Koine has no way to write it yet (open question 8).
-- **Probing Python** is no longer quiet: each candidate's `--version` is shown.
+- **Probing Python** was, until 23 October, not quiet: each candidate's `--version` was shown, and so was the
+  Microsoft Store stub's "Python was not found; …" on stderr, which read as a fault. The run below caught it.
+  Restored: `Python.find` now has native bodies that probe quietly, as `Find-Python` did, since Koine cannot yet
+  silence a command.
 - **`deploy.ps1`** is judged by its exit status, not by an exception it throws.
+- **The Linux step** lists its problems in `BUILD.txt`'s order. The original kept them in a hashtable, so in no
+  particular order.
+- **The last line** has no blank line before it.
+
+## Run side by side
+
+On 23 October both ran for real, non-interactively, under Windows PowerShell 5.1, from a worktree of
+`vexelray-dist` at `0de55cb`, one after the other:
+
+- **With the build:** each built the whole stack (27 and 28 minutes), started all nine applications, and failed at
+  the Linux step with exit 1, naming the same five repos that had moved on since the VM's build.
+- **With `-SkipBuild`,** given a `BUILD.txt` naming the commits checked out, which no real Linux build had: both
+  passed with exit 0. What `deploy.ps1` generated, in `vexelray-dist` and in `sibarum.github.io`, was the same byte
+  for byte, but for each manifest's `publishedAt` time.
+
+Every other line printed was the same, apart from the differences listed above and the step names, which Koine
+capitalises.
 
 ## Later life
 

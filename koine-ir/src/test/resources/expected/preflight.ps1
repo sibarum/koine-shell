@@ -213,11 +213,14 @@ function List_join([string[]]$items, [string]$separator) {
     return ($items -join $separator)
 }
 
-function Home_directory {
-    return $HOME
-}
-
-function String_empty {
+function Python_find {
+    foreach ($candidate in @('python', 'py', (Join-Path $HOME 'anaconda3\python.exe'), (Join-Path $HOME 'miniconda3\python.exe'))) {
+        if (-not (Get-Command $candidate -ErrorAction SilentlyContinue)) { continue }
+        $ErrorActionPreference = 'Continue'
+        $global:LASTEXITCODE = 0
+        try { & $candidate --version *> $null } catch { continue }
+        if ($LASTEXITCODE -eq 0) { return $candidate }
+    }
     return ''
 }
 
@@ -225,16 +228,12 @@ function Console_success([string]$message) {
     Write-Host $message -ForegroundColor Green
 }
 
-function Script_sibling([string]$name) {
-    return (Join-Path $PSScriptRoot "$name.ps1")
+function String_empty {
+    return ''
 }
 
-function Python_find {
-    $home_ = Home_directory
-    foreach ($candidate in @('python', 'py', (Path_join @($home_, 'anaconda3', 'python.exe')), (Path_join @($home_, 'miniconda3', 'python.exe')))) {
-        if (Test-Succeeds $candidate @('--version')) { return $candidate }
-    }
-    return String_empty
+function Script_sibling([string]$name) {
+    return (Join-Path $PSScriptRoot "$name.ps1")
 }
 
 function linuxBuildProblems($logs, $root, $configs) {
