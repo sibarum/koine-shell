@@ -182,7 +182,7 @@ public final class Parser {
                 Expr e = expr();
                 if (accept(Kind.ASSIGN)) {
                     if (!(e instanceof Expr.Name) && !(e instanceof Expr.Index))
-                        throw new KoineException(source, e.pos(), "only a name, or an item such as map[key], can be assigned");
+                        throw new KoineException(source, at, "only a name, or an item such as map[key], can be assigned");
                     Expr value = expr();
                     endOfLine();
                     return new Statement.Assign(e, value, at);
@@ -262,8 +262,11 @@ public final class Parser {
                 Pos at = peek().pos();
                 String name = name("a parameter's name");
                 Optional<TypeRef> type = accept(Kind.COLON) ? Optional.of(type()) : Optional.empty();
+                boolean repeated = type.isPresent() && at(Kind.DOT) && peekAt(1).kind() == Kind.DOT
+                        && peekAt(2).kind() == Kind.DOT;
+                if (repeated) for (int i = 0; i < 3; i++) advance();
                 Optional<Expr> defaultValue = accept(Kind.ASSIGN) ? Optional.of(expr()) : Optional.empty();
-                parameters.add(new Statement.Param(name, type, defaultValue, at));
+                parameters.add(new Statement.Param(name, type, repeated, defaultValue, at));
             } while (accept(Kind.COMMA));
         }
         expect(Kind.RPAREN, ") after the parameters");
@@ -356,7 +359,8 @@ public final class Parser {
         while (true) {
             Token t = peek();
             if (accept(Kind.DOT)) {
-                e = new Expr.Member(e, name("a member's name after ."), e.pos());
+                Pos at = peek().pos();
+                e = new Expr.Member(e, name("a member's name after ."), at);
             } else if (accept(Kind.LPAREN)) {
                 e = new Expr.Call(e, arguments(), e.pos());
             } else if (accept(Kind.LBRACKET)) {

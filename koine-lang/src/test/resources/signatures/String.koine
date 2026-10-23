@@ -1,0 +1,23 @@
+module String
+
+# Signatures only, for the checker's tests: the bodies are placeholders. The real module is roadmap step 4.
+
+def empty: String
+  native Windows, Linux, Mac
+    # placeholder
+
+def endsWith(text: String, suffix: String): Bool
+  native Windows, Linux, Mac
+    # placeholder
+
+def take(text: String, count: Number): String
+  native Windows, Linux, Mac
+    # placeholder
+
+def words(text: String): [String]
+  native Windows, Linux, Mac
+    # placeholder
+
+def matches(text: String, pattern: String): Bool
+  native Windows, Linux, Mac
+    # placeholder

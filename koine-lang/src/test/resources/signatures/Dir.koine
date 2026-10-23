@@ -1,0 +1,7 @@
+module Dir
+
+# Signatures only, for the checker's tests: the bodies are placeholders. The real module is roadmap step 4.
+
+def create(path: String)
+  native Windows, Linux, Mac
+    # placeholder

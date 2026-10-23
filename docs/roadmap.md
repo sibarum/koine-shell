@@ -35,9 +35,18 @@ the native code. The first use is deployment and installer scripts; a REPL comes
      after a capture, and `return` at the script's level.
    - Declaring the OSes a script supports, and marking it as a bootstrap script (open question 7). *Settled:*
      `script Preflight<Windows>`, `bootstrap script`.
-2. **A parser and checker** for the language, with preflight as the first test. *The parser is done:*
-   `koine-lang` reads scripts and modules into a syntax tree, and parses preflight and the `Python`, `Clock` and
-   `Process` examples. The checker is next.
+2. **A parser and checker** for the language, with preflight as the first test. *Both are done:* `koine-lang` reads
+   scripts and modules into a syntax tree, and `Checker` checks them: names and scopes, types (with a script's untyped
+   `def`s taking theirs from their first call), what goes where, that every OS has a body, the two tier rules, and
+   blocks. Preflight and the `Python`, `Clock` and `Process` examples check clean, against signature-only stand-ins for
+   the rest of the standard library in the tests. Not checked yet:
+   - that a `def` with a result returns on every path;
+   - native bodies, which stay the module author's job (open question 1);
+   - `within` and `step` as members of the standard library. The checker still treats them as keywords, which they
+     will stay in how they are written.
+
+   The checker reports problems only. What the compiler will need from it, each name resolved to its declaration and
+   each expression's type, comes with step 3.
 3. **Settle the IR.** Map preflight onto the portable IR in `koine-ir`, keep what it uses, and add or drop the rest.
    Nodes that the language makes library members (`Print` with a colour, `Pause`, `ScriptPath`, `ReadJson`, `Field`,
    `Spawn`, `IsInteractive` and the like) move into native-tier modules, and their per-shell code with them.

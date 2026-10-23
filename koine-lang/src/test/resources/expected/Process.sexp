@@ -15,3 +15,8 @@
       | return $null -ne (Get-Process -Id $process.id -ErrorAction SilentlyContinue)
     (native Linux Mac)
       | kill -0 "$process_id" 2>/dev/null
+  (def stop (process: Process))
+    (native Windows)
+      | Stop-Process -Id $process.id -Force -ErrorAction SilentlyContinue
+    (native Linux Mac)
+      | kill "$process_id" 2>/dev/null || true

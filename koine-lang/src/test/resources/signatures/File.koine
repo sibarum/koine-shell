@@ -1,0 +1,11 @@
+module File
+
+# Signatures only, for the checker's tests: the bodies are placeholders. The real module is roadmap step 4.
+
+def exists(path: String): Bool
+  native Windows, Linux, Mac
+    # placeholder
+
+def lines(path: String): [String]
+  native Windows, Linux, Mac
+    # placeholder

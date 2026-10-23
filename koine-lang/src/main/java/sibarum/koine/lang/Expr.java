@@ -59,7 +59,10 @@ public sealed interface Expr {
         }
     }
 
-    /** {@code target.name}: a field, a member of a module, or a member looked up by the target's type. */
+    /**
+     * {@code target.name}: a field, a member of a module, or a member looked up by the target's type. Its position is
+     * the name's.
+     */
     record Member(Expr target, String name, Pos pos) implements Expr {
     }
 

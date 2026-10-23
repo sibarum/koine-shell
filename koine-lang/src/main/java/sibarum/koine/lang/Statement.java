@@ -120,7 +120,10 @@ public sealed interface Statement {
     record Field(String name, TypeRef type, boolean optional, Pos pos) {
     }
 
-    /** A parameter of a script or a {@code def}. A script's own {@code def}s may leave the type out. */
-    record Param(String name, Optional<TypeRef> type, Optional<Expr> defaultValue, Pos pos) {
+    /**
+     * A parameter of a script or a {@code def}. A script's own {@code def}s may leave the type out. A {@code repeated}
+     * one, {@code parts: String...}, takes any number of arguments.
+     */
+    record Param(String name, Optional<TypeRef> type, boolean repeated, Optional<Expr> defaultValue, Pos pos) {
     }
 }

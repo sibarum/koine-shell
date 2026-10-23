@@ -68,7 +68,7 @@ values are quoted in and out, and what becomes of Bash's `local` and PowerShell'
 | Keyword | Role |
 |---|---|
 | `script` | Declares the script: its name, its OSes, and its inputs with defaults. `bootstrap script` marks an installer. |
-| `let` | Introduces a name. Plain `x = …` reassigns one that exists, so a misspelled name is an error, not a new variable. A name lives until the end of its block. |
+| `let` | Introduces a name. Plain `x = …` reassigns one that exists, so a misspelled name is an error, not a new variable. A name lives until the end of its block, and cannot be introduced again while it lives. An empty list or map takes its type from what is first put in it. |
 | `if` / `else` | Branches at runtime. `else if` chains. `else` after a captured command gives a value if the command fails (see [Literal commands](#literal-commands)). |
 | `on` | Gives a `def` a Koine body for some OSes. Chosen when compiling. |
 | `for … in` | Loops over a list, or over the lines of a command's output as they come. |
@@ -251,7 +251,8 @@ does not capture becomes part of its result. These rules make functions safe on 
    ```
 
 3. **Arguments are values, and every variable is local.** Bash functions can see their caller's local variables. The
-   compiler makes every `let` inside a function local, so a function cannot change anything it was not passed.
+   compiler makes every `let` inside a function local, so a function cannot change anything it was not passed. Nor
+   can it read the script's variables: a function sees its parameters, the script's functions and records, and modules.
 4. **`fail` inside a function stops the whole script.** Rule 1 guarantees it: nothing runs in a subshell.
 5. **A result is a string, a number, a boolean, a list or a record.** A map stays inside the function that builds it.
    See [Records](#records).
@@ -318,7 +319,15 @@ def sleep(seconds: Number)
 Every member declares its parameter types and its result type: `def start(exe: String, log: String): Process`. A
 member with no result leaves the result out. The types are `String`, `Number` (a whole number), `Bool`, lists such as
 `[String]`, and records. A script's own `def`s may leave the types out, as they do now; a module is a contract, so its
-members may not.
+members may not, and neither may a `def` with a native body.
+
+- **A script's `def` without types takes them from its first call.** The arguments there fix its parameter types, and
+  its `return`s fix its result; every later call must agree. One that is never called must declare them.
+- **The last parameter can be repeated:** `def join(parts: String...): String` takes any number of strings, and the
+  body sees `parts` as a `[String]`. That is how `Path.join(dist, 'apps', app.id)` is declared.
+- **`Block`** is the type of a block given to a member (see [Members that take a block](#members-that-take-a-block)).
+- **`Data`** is what a read gives, such as `Json.read(path): Data`. It can only be read into a record with `as`, so the
+  record says which fields the native body must produce (see [Reading and writing data](#reading-and-writing-data)).
 
 ### Tiers
 
@@ -377,13 +386,23 @@ def running(process: Process): Bool
     return $null -ne (Get-Process -Id $process.id -ErrorAction SilentlyContinue)
   native Linux, Mac
     kill -0 "$process_id" 2>/dev/null
+
+def stop(process: Process)
+  native Windows
+    Stop-Process -Id $process.id -Force -ErrorAction SilentlyContinue
+  native Linux, Mac
+    kill "$process_id" 2>/dev/null || true
 ```
 
 `process.running` is `Process.running(process)`: a member written after a value is looked up in the module that
-declares the value's record. The members of strings, lists and maps (`.endsWith`, `.take`, `.words`, `.join`,
-`.isEmpty`, `.keys`, `.has`, `.matches`) are written the same way, in the built-in modules `String`, `List` and `Map`.
-Members that change a value in place, such as `list.add(x)` and `map[key] = x`, are built into the compiler instead,
-because a function cannot change what it was passed (rule 3).
+declares the value's record. The members of strings, numbers and lists (`.endsWith`, `.take`, `.words`, `.matches`,
+`.text`, `.join`) are written the same way, in the built-in modules `String`, `Number` and `List`. A few are built into
+the compiler instead:
+
+- **Members that change a value in place,** `list.add(x)` and `map[key] = x`, because a function cannot change what
+  it was passed (rule 3).
+- **Members that work on any list, map or record,** `.isEmpty` (on strings too), `map.keys` and `map.has(key)`,
+  because a module member's parameter has one type, and there is no way to write "a list of anything".
 
 A native body is a leaf: it never holds Koine and never calls back into it. Where native code has to come before and
 after some Koine, the member is written in Koine and calls native members for those parts; see the next section.

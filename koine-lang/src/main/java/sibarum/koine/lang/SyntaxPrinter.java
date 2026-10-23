@@ -112,7 +112,7 @@ public final class SyntaxPrinter {
     private static String params(List<Statement.Param> params) {
         if (params.isEmpty()) return "";
         return " (" + params.stream()
-                .map(p -> p.name() + p.type().map(t -> ": " + type(t)).orElse("")
+                .map(p -> p.name() + p.type().map(t -> ": " + type(t)).orElse("") + (p.repeated() ? "..." : "")
                         + p.defaultValue().map(v -> " = " + expr(v)).orElse(""))
                 .collect(Collectors.joining(", ")) + ")";
     }
