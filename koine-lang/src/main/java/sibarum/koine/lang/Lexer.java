@@ -112,7 +112,19 @@ final class Lexer {
     private Token scanToken() {
         Pos at = pos();
         char c = text.charAt(i);
-        if (commandStarts()) return scanCommand();
+        int prefix = c == '`' || c == '"' || c == '\'' ? 0 : prefixLength();
+        if (prefix >= 0) {
+            int start = i;
+            char open = prefix >= 2 ? text.charAt(i) : NONE;
+            char close = prefix >= 2 ? text.charAt(i + 1) : NONE;
+            char escape = prefix % 2 == 1 ? text.charAt(i + prefix - 1) : NONE;
+            if (escape != NONE && (escape == open || escape == close))
+                throw error(at, "the escape character " + escape + " is one of the value brackets; choose another");
+            i += prefix;
+            return text.charAt(i) == '`'
+                    ? scanCommand(at, start, open, close, escape)
+                    : scanString(at, start, open, close, escape);
+        }
         if (isDigit(c)) {
             int start = i;
             while (i < text.length() && isDigit(text.charAt(i))) i++;
@@ -126,7 +138,6 @@ final class Lexer {
             String word = text.substring(start, i);
             return Token.of(Token.KEYWORDS.getOrDefault(word, Kind.NAME), word, at);
         }
-        if (c == '"' || c == '\'') return scanString(c);
         i++;
         return switch (c) {
             case '(' -> Token.of(Kind.LPAREN, "(", at);
@@ -153,26 +164,37 @@ final class Lexer {
 
     // ---- strings ------------------------------------------------------------------------------------------------
 
-    /** A string in {@code quote}s. {@code {…}} inserts an expression; nothing else is special. */
-    private Token scanString(char quote) {
-        Pos at = pos();
-        int start = i;
-        i++;
+    /**
+     * A string, from its run of quotes at {@code i}. It ends at a run of exactly as many of the same quote, and a
+     * shorter or longer run inside is literal, so there is no empty string literal: {@code ''} opens a string. Nothing
+     * in it is special unless its prefix defined value brackets, which insert an expression, or an escape character,
+     * which makes the character after it literal. The token's text starts at {@code start}, before the prefix.
+     */
+    private Token scanString(Pos at, int start, char open, char close, char escape) {
+        String quotes = quoteRun();
         List<Segment> parts = new ArrayList<>();
         StringBuilder run = new StringBuilder();
         Pos runAt = pos();
         while (true) {
-            if (atEndOfLine()) throw error(at, "the string is not closed: it needs a " + quote + " on this line");
+            if (atEndOfLine()) throw error(at, notClosed("the string", quotes, "on this line"));
             char c = text.charAt(i);
-            if (c == quote) {
-                i++;
-                break;
-            }
-            if (c == '{') {
+            if (c == escape) {
+                if (run.isEmpty()) runAt = pos();
+                run.append(escaped());
+            } else if (c == quotes.charAt(0)) {
+                int n = run(c);
+                if (n == quotes.length()) {
+                    i += n;
+                    break;
+                }
+                if (run.isEmpty()) runAt = pos();
+                run.append(text, i, i + n);
+                i += n;
+            } else if (c == open) {
                 if (!run.isEmpty()) parts.add(new Text(run.toString(), runAt));
                 run.setLength(0);
                 i++;
-                parts.add(scanCode('}'));
+                parts.add(scanCode(close));
                 runAt = pos();
             } else {
                 if (run.isEmpty()) runAt = pos();
@@ -181,7 +203,82 @@ final class Lexer {
             }
         }
         if (!run.isEmpty()) parts.add(new Text(run.toString(), runAt));
-        return Token.string(text.substring(start, i), at, parts, quote);
+        return Token.string(text.substring(start, i), at, parts, quotes, open, close, escape);
+    }
+
+    /** The run of quotes at {@code i}, which it consumes. */
+    private String quoteRun() {
+        int n = run(text.charAt(i));
+        String quotes = text.substring(i, i + n);
+        i += n;
+        return quotes;
+    }
+
+    /** What a string or a quote that is not closed needs, and the way to write an empty string if it looks like one. */
+    private static String notClosed(String what, String quotes, String where) {
+        return what + " is not closed: it needs " + quotes + " " + where
+                + (quotes.length() == 2 ? "; there is no empty string literal: write String.empty" : "");
+    }
+
+    /** The character after the escape character at {@code i}, which must be on the same line. Consumes both. */
+    private char escaped() {
+        Pos at = pos();
+        i++;
+        if (atEndOfLine()) throw error(at, "the escape character " + text.charAt(i - 1) + " needs a character after it");
+        return text.charAt(i++);
+    }
+
+    // ---- prefixes -----------------------------------------------------------------------------------------------
+
+    /** No value brackets, or no escape character. */
+    static final char NONE = 0;
+
+    /** Symbols Koine's own syntax does not use, which can be value brackets and escape characters. */
+    private static final String FREE_SYMBOLS = "~@$%^&*+-/\\|;";
+
+    /**
+     * How many characters at {@code i} make the prefix of the string or command right after them, or -1 if they are
+     * not one. A prefix defines what is special inside, since by default nothing is:
+     * <ul>
+     *   <li>one symbol is an escape character: {@code \'it\'s'};</li>
+     *   <li>two characters are value brackets: {@code {}"{name} is up"};</li>
+     *   <li>three are value brackets and then an escape character: {@code {}\"{name} said \"hi\""}.</li>
+     * </ul>
+     * Value brackets are an opening bracket and its closing one ({@code ()}, {@code []}, {@code {}} or {@code <>}), or
+     * any two symbols Koine's own syntax does not use, the same one twice included ({@code %%}, {@code ^|}). An escape
+     * character is one of those symbols. Koine's own symbols cannot be used otherwise, because they already mean
+     * something before a string: {@code [['a']]}, {@code a=='x'}, {@code f(a,['x'])}.
+     */
+    private int prefixLength() {
+        if (opensLiteral(i + 1) && isFree(i)) return 1;
+        if (!opensLiteral(i + 2) && !opensLiteral(i + 3)) return -1;
+        if (i + 1 >= text.length()) return -1;
+        char open = text.charAt(i);
+        char close = text.charAt(i + 1);
+        if (closerOf(open) != close && !(isFree(i) && isFree(i + 1))) return -1;
+        if (opensLiteral(i + 2)) return 2;
+        return isFree(i + 2) ? 3 : -1;
+    }
+
+    /** Whether a string or a command opens at {@code at}. */
+    private boolean opensLiteral(int at) {
+        if (at >= text.length()) return false;
+        char c = text.charAt(at);
+        return c == '`' || c == '"' || c == '\'';
+    }
+
+    private boolean isFree(int at) {
+        return at < text.length() && FREE_SYMBOLS.indexOf(text.charAt(at)) >= 0;
+    }
+
+    private static char closerOf(char open) {
+        return switch (open) {
+            case '(' -> ')';
+            case '[' -> ']';
+            case '{' -> '}';
+            case '<' -> '>';
+            default -> 0;
+        };
     }
 
     /**
@@ -215,41 +312,13 @@ final class Lexer {
     // ---- literal commands ---------------------------------------------------------------------------------------
 
     /**
-     * A command starts at a run of backticks, or at the two brackets that choose its value brackets right in front
-     * of one. The brackets are an opening character and its closing one: {@code ()}, {@code []}, {@code {}} or
-     * {@code <>}.
+     * A literal command, from its backticks at {@code i}. It ends at a run of exactly as many backticks as opened it,
+     * wherever that is; a shorter or longer run inside is literal. Words are split at spaces and quotes group them.
+     * Value brackets and an escape character work only if the prefix defined them: the brackets insert a value, and
+     * the escape character makes the character after it literal text in the word, even a space, a quote or a backtick.
+     * The token's text starts at {@code start}, before the prefix.
      */
-    private boolean commandStarts() {
-        char c = text.charAt(i);
-        if (c == '`') return true;
-        if (i + 2 >= text.length() || text.charAt(i + 2) != '`') return false;
-        return closerOf(c) == text.charAt(i + 1);
-    }
-
-    private static char closerOf(char open) {
-        return switch (open) {
-            case '(' -> ')';
-            case '[' -> ']';
-            case '{' -> '}';
-            case '<' -> '>';
-            default -> 0;
-        };
-    }
-
-    /**
-     * A literal command. It ends at a run of exactly as many backticks as opened it, wherever that is; a shorter or
-     * longer run inside is literal. Words are split at spaces, quotes group them, and the brackets insert a value.
-     */
-    private Token scanCommand() {
-        Pos at = pos();
-        int start = i;
-        char open = '{';
-        char close = '}';
-        if (text.charAt(i) != '`') {
-            open = text.charAt(i);
-            close = text.charAt(i + 1);
-            i += 2;
-        }
+    private Token scanCommand(Pos at, int start, char open, char close, char escape) {
         int ticks = backtickRun();
         i += ticks;
         String closing = "`".repeat(ticks);
@@ -266,14 +335,17 @@ final class Lexer {
             Pos runAt = pos();
             while (!atEndOfLine() && text.charAt(i) != ' ' && text.charAt(i) != '\t' && backtickRun() != ticks) {
                 char c = text.charAt(i);
-                if (c == '\'' || c == '"' || c == open) {
+                if (c == escape) {
+                    if (run.isEmpty()) runAt = pos();
+                    run.append(escaped());
+                } else if (c == '\'' || c == '"' || c == open) {
                     if (!run.isEmpty()) word.add(new Text(run.toString(), runAt));
                     run.setLength(0);
                     if (c == open) {
                         i++;
                         word.add(scanCode(close));
                     } else {
-                        word.add(scanQuoted(c, ticks));
+                        word.add(scanQuoted(ticks, escape));
                     }
                     runAt = pos();
                 } else if (c == '`') {
@@ -291,30 +363,46 @@ final class Lexer {
             words.add(word);
         }
         if (words.isEmpty()) throw error(at, "the command is empty");
-        return Token.command(text.substring(start, i), at, words, open, close);
+        return Token.command(text.substring(start, i), at, words, open, close, escape);
     }
 
-    /** Text in quotes inside a command, taken as it is. The command's closing backticks may not fall inside. */
-    private Quoted scanQuoted(char quote, int ticks) {
+    /**
+     * Text in quotes inside a command, taken as it is except for the command's escape character, if it has one. Like
+     * a string, it opens with a run of quotes and ends at a run of exactly as many. The command's closing backticks
+     * may not fall inside unless escaped.
+     */
+    private Quoted scanQuoted(int ticks, char escape) {
         Pos at = pos();
-        i++;
-        int start = i;
+        String quotes = quoteRun();
+        StringBuilder quoted = new StringBuilder();
         while (true) {
             if (atEndOfLine() || backtickRun() == ticks)
-                throw error(at, "the quote is not closed: it needs a " + quote + " before the command ends");
-            if (text.charAt(i) == quote) break;
-            if (text.charAt(i) == '`') i += backtickRun();
-            else i++;
+                throw error(at, notClosed("the quote", quotes, "before the command ends"));
+            char c = text.charAt(i);
+            if (c == escape) {
+                quoted.append(escaped());
+                continue;
+            }
+            int n = c == '`' || c == quotes.charAt(0) ? run(c) : 1;
+            if (c == quotes.charAt(0) && n == quotes.length()) {
+                i += n;
+                break;
+            }
+            quoted.append(text, i, i + n);
+            i += n;
         }
-        String quoted = text.substring(start, i);
-        i++;
-        return new Quoted(quoted, quote, at);
+        return new Quoted(quoted.toString(), quotes, at);
     }
 
     /** How many backticks start at {@code i}. */
     private int backtickRun() {
+        return run('`');
+    }
+
+    /** How many of {@code c} start at {@code i}. */
+    private int run(char c) {
         int n = 0;
-        while (i + n < text.length() && text.charAt(i + n) == '`') n++;
+        while (i + n < text.length() && text.charAt(i + n) == c) n++;
         return n;
     }
 

@@ -21,8 +21,8 @@ public record Word(List<Part> parts, Pos pos) {
     public record Literal(String text, Pos pos) implements Part {
     }
 
-    /** Text in {@code '…'} or {@code "…"}, without the quotes. Nothing in it is expanded. */
-    public record Quoted(String text, char quote, Pos pos) implements Part {
+    /** Text in a run of {@code '} or {@code "}, without the quotes. Nothing in it is expanded but escapes. */
+    public record Quoted(String text, String quotes, Pos pos) implements Part {
     }
 
     /** A value inserted between the command's brackets, {@code {…}} by default. */

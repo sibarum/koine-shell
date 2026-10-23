@@ -3,6 +3,7 @@ package sibarum.koine.lang;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -26,9 +27,17 @@ class ParserTest {
     // ---- literal commands ---------------------------------------------------------------------------------------
 
     @Test
+    void aCommandWithoutAPrefixIsPlain() {
+        assertEquals("(cmd [find] [.] [-exec] [rm] [{}] [;])", expr("`find . -exec rm {} ;`"));
+        Expr.Command c = (Expr.Command) parsed("`echo {x} \\n`");
+        assertEquals(List.of(Word.Literal.class), c.words().get(1).parts().stream().map(Object::getClass).toList());
+        assertEquals("\\n", ((Word.Literal) c.words().get(2).parts().getFirst()).text());
+    }
+
+    @Test
     void anInsertIsOneWordAndJoinsTheTextBesideIt() {
-        assertEquals("(cmd [git] [-C] [{checkout}] [rev-parse] [HEAD])", expr("`git -C {checkout} rev-parse HEAD`"));
-        assertEquals("(cmd [cp] [{a} .bak] [--log= {(. x log)}])", expr("`cp {a}.bak --log={x.log}`"));
+        assertEquals("(cmd {} [git] [-C] [{checkout}] [rev-parse] [HEAD])", expr("{}`git -C {checkout} rev-parse HEAD`"));
+        assertEquals("(cmd {} [cp] [{a} .bak] [--log= {(. x log)}])", expr("{}`cp {a}.bak --log={x.log}`"));
     }
 
     @Test
@@ -39,9 +48,15 @@ class ParserTest {
 
     @Test
     void twoCharactersBeforeTheBackticksChooseTheBrackets() {
-        assertEquals("(cmd <> [jq] [-r] ['.members[] | {name: .config}'] [{suiteFile}])",
+        assertEquals("(cmd <> [jq] [-r] ['.members[] | {name: .config}'] [<suiteFile>])",
                 expr("<>`jq -r '.members[] | {name: .config}' <suiteFile>`"));
-        assertEquals("(cmd () [x] [{a}] [{}])", expr("()`x (a) {}`"));
+        assertEquals("(cmd () [x] [(a)] [{}])", expr("()`x (a) {}`"));
+    }
+
+    @Test
+    void anyTwoSymbolsKoineDoesNotUseCanBeTheBrackets() {
+        assertEquals("(cmd %% [cmd] [/c] [%(. d name)%] [{}])", expr("%%`cmd /c %d.name% {}`"));
+        assertEquals("(cmd ^| [echo] [$HOME] [^x|])", expr("^|`echo $HOME ^x|`"));
     }
 
     @Test
@@ -56,17 +71,62 @@ class ParserTest {
         assertEquals("(run (cmd [build.cmd]))\n", statement("`build.cmd`"));
         assertEquals("(let head (cmd [git] [rev-parse] [HEAD]))\n", statement("let head = `git rev-parse HEAD`"));
         assertEquals("(try (cmd [git] [status]))\n", statement("try `git status`"));
-        assertEquals("(not (try? (cmd [{python}] [--check])))", expr("not try `{python} --check`"));
+        assertEquals("(not (try? (cmd {} [{python}] [--check])))", expr("not try {}`{python} --check`"));
+    }
+
+    @Test
+    void anEscapeCharacterInACommandMakesAnyCharacterLiteral() {
+        assertEquals("(cmd \\ [echo] [a b] [`] ['it's'])", expr("\\`echo a\\ b \\` 'it\\'s'`"));
+        assertEquals("(cmd {}^ [echo] [{] [{x}] [a^b])", expr("{}^`echo ^{ {x} a^^b`"));
     }
 
     // ---- strings ------------------------------------------------------------------------------------------------
 
     @Test
-    void stringsInsertValuesAndAnInsertCanHoldEitherQuote() {
-        assertEquals("\"{(. app name)} is up\"", expr("\"{app.name} is up\""));
-        assertEquals("\"built: {(call (. apps join) ', ')}\"", expr("\"built: {apps.join(', ')}\""));
-        assertEquals("\"a {(call f \"b\")} c\"", expr("\"a {f(\"b\")} c\""));
+    void aStringWithoutAPrefixIsPlain() {
+        Expr.Str s = (Expr.Str) parsed("'{x} \\n {'");
+        assertEquals(List.of(new Expr.Str.Text("{x} \\n {", s.parts().getFirst().pos())), s.parts());
         assertEquals("'^[[:space:]]*(#|$)'", expr("'^[[:space:]]*(#|$)'"));
+        assertEquals("'^[0-9]{3}$'", expr("'^[0-9]{3}$'"));
+    }
+
+    @Test
+    void aStringEndsAtAsManyQuotesAsOpenedIt() {
+        assertEquals("'''it's'''", expr("'''it's'''"));
+        assertEquals("'a '' b'", expr("'a '' b'"));
+        assertEquals("\"\"say \"hi\" now\"\"", expr("\"\"say \"hi\" now\"\""));
+        assertEquals("(cmd [echo] [''it's''] ['x'])", expr("`echo ''it's'' 'x'`"));
+    }
+
+    @Test
+    void stringsInsertValuesAndAnInsertCanHoldEitherQuote() {
+        assertEquals("{}\"{(. app name)} is up\"", expr("{}\"{app.name} is up\""));
+        assertEquals("{}\"built: {(call (. apps join) ', ')}\"", expr("{}\"built: {apps.join(', ')}\""));
+        assertEquals("{}\"a {(call f {}\"{b}\")} c\"", expr("{}\"a {f({}\"{b}\")} c\""));
+    }
+
+    @Test
+    void anEscapeCharacterInAStringMakesTheNextCharacterLiteral() {
+        assertEquals("\\'it's'", expr("\\'it\\'s'"));
+        assertEquals("{}\\\"{name} said \"hi\" {x}\"", expr("{}\\\"{name} said \\\"hi\\\" \\{x}\""));
+        assertEquals("%'50%'", expr("%'50%%'"));
+    }
+
+    @Test
+    void stringsChooseTheirBracketsAsCommandsDo() {
+        assertEquals("<>'^[0-9]{3}$ <(. x n)>'", expr("<>'^[0-9]{3}$ <x.n>'"));
+        assertEquals("$$\"{a} costs $price$\"", expr("$$\"{a} costs $price$\""));
+        assertEquals("()'{ ((call f <>'<y>')) }'", expr("()'{ (f(<>'<y>')) }'"));
+        Expr.Str s = (Expr.Str) parsed("<>'{3}<n>'");
+        assertEquals(List.of(Expr.Str.Text.class, Expr.Str.Insert.class), s.parts().stream().map(Object::getClass).toList());
+    }
+
+    @Test
+    void koinesOwnSymbolsBeforeAStringKeepTheirMeaning() {
+        assertEquals("[['a'] ['b']]", expr("[['a'], ['b']]"));
+        assertEquals("(== a 'x')", expr("a=='x'"));
+        assertEquals("(call f a ['x'])", expr("f(a,['x'])"));
+        assertEquals("(call f 'x')", expr("f(('x'))"));
     }
 
     // ---- expressions --------------------------------------------------------------------------------------------
@@ -150,10 +210,17 @@ class ParserTest {
     void mistakesSayWhereTheyAre() {
         assertError("s.koine:2:3: the command is not closed: it needs `` on this line",
                 "script S<OS>\n  ``echo `\n");
-        assertError("s.koine:2:9: the quote is not closed: it needs a ' before the command ends",
+        assertError("s.koine:2:9: the quote is not closed: it needs ' before the command ends",
                 "script S<OS>\n  `echo 'a b`\n");
         assertError("s.koine:2:8: names cannot contain _", "script S<OS>\n  let a_b = 1\n");
         assertError("s.koine:3:3: else without an if before it", "script S<OS>\n  print 1\n  else\n    print 2\n");
+        assertError("s.koine:2:9: the string is not closed: it needs '' on this line; there is no empty string literal: "
+                + "write String.empty", "script S<OS>\n  print ''\n");
+        assertError("s.koine:2:18: the quote is not closed: it needs '' before the command ends; there is no empty "
+                + "string literal: write String.empty", "script S<OS>\n  `git commit -m ''`\n");
+        assertError("s.koine:2:12: the escape character \\ needs a character after it", "script S<OS>\n  print \\'a\\\n");
+        assertError("s.koine:2:9: the escape character % is one of the value brackets; choose another",
+                "script S<OS>\n  print %%%'a'\n");
         assertError("s.koine:2:3: native goes directly in a def's body", "script S<OS>\n  native Windows\n    x\n");
         assertError("s.koine:3:3: native Windows has no body", "module M\ndef f\n  native Windows\n");
         assertError("s.koine:2:3: only a name, or an item such as map[key], can be assigned",
@@ -167,8 +234,12 @@ class ParserTest {
     // ---- helpers ------------------------------------------------------------------------------------------------
 
     private static String expr(String text) {
+        return SyntaxPrinter.print(parsed(text));
+    }
+
+    private static Expr parsed(String text) {
         SourceFile.Script s = (SourceFile.Script) Parser.parse("e.koine", "script E<OS>\n  print " + text + "\n");
-        return SyntaxPrinter.print(((Statement.Print) s.body().getFirst()).message());
+        return ((Statement.Print) s.body().getFirst()).message();
     }
 
     private static String statement(String text) {

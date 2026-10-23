@@ -443,7 +443,7 @@ public final class Parser {
                 case Token.Quoted q -> throw new IllegalStateException("a string has no quoted parts");
             }
         }
-        return new Expr.Str(parts, t.open(), t.pos());
+        return new Expr.Str(parts, t.quotes(), t.open(), t.close(), t.escape(), t.pos());
     }
 
     private Expr.Command command(String what) {
@@ -454,13 +454,13 @@ public final class Parser {
             for (Segment s : segments) {
                 parts.add(switch (s) {
                     case Token.Text text -> new Word.Literal(text.text(), text.pos());
-                    case Token.Quoted q -> new Word.Quoted(q.text(), q.quote(), q.pos());
+                    case Token.Quoted q -> new Word.Quoted(q.text(), q.quotes(), q.pos());
                     case Code code -> new Word.Insert(inserted(code), code.pos());
                 });
             }
             words.add(new Word(parts, segments.getFirst().pos()));
         }
-        return new Expr.Command(words, t.open(), t.close(), t.pos());
+        return new Expr.Command(words, t.open(), t.close(), t.escape(), t.pos());
     }
 
     /** The expression between a string's or a command's brackets. */

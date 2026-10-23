@@ -13,8 +13,9 @@ language, not the other way round. The dialect IRs and their printers stay as th
   which is the one least likely to be missing, limited or oddly configured.
 - **The script reads; the library knows the shell.** Library members such as `Git.getRepoDetails` are written by hand,
   idiomatically, once per OS. The compiler never has to make Bash behave like a general-purpose language.
-- **No escape sequences.** Commands are written exactly as they should arrive. Where a character would clash, you
-  choose different delimiters instead of escaping it.
+- **Nothing is special unless you say so.** Strings and commands are written exactly as they should arrive. Value
+  brackets and an escape character exist only where a prefix defines them, and where a character would clash, you
+  choose different delimiters.
 - **For internal use.** Managing utility binaries could come later as library modules. It is not a goal.
 
 ## Scripts and targets
@@ -65,8 +66,13 @@ Operators: `and`, `or`, `not`, `in` (list membership and substring), `==`, `!=`,
 
 Provisional, and kept small:
 
-- Strings in `"…"` or `'…'`, with `{expr}` inserting a value: `"{app.name} is up"`.
+- Strings in `'…'` or `"…"`, or between longer runs of quotes: `'''it's'''`. A string is plain text unless a prefix
+  defines value brackets or an escape character: `{}"{app.name} is up"`. See [Choosing
+  delimiters](#choosing-delimiters).
+- There is no empty string literal, since `''` opens a string; the empty string is `String.empty`.
 - Whole numbers, `true` and `false`.
+- Nothing is converted to a string for you. A value inserted into a string or a command must be a string already (a
+  list of strings in a command), so a number is converted explicitly: `{}"up for {seconds.text}s"`.
 - Lists `['master', 'main']` and maps `{}`, indexed with `[…]`.
 - Members with `.`: `repo.branch.name`, `line.words`, `dead.add(problem)`. A member that takes no arguments is written
   without parentheses.
@@ -80,19 +86,21 @@ A literal command goes in backticks. Where it appears decides what it does:
 |---|---|---|
 | As a statement | Runs it; the script stops if it fails | `` `build.cmd` `` |
 | As a value | Captures its output, without trailing line breaks | ``let head = `git rev-parse HEAD` `` |
-| After `try` in a condition | Gives true or false | ``if not try `{python} {notices} --check` `` |
+| After `try` in a condition | Gives true or false | ``if not try {}`{python} {notices} --check` `` |
 | `try` as a statement | Runs it and ignores its exit status | ``try `git status --short` `` |
-| After `for … in` | Runs the body for each line of output as it comes; the script stops if it then fails | ``for line in `{buildCmd}` `` |
+| After `for … in` | Runs the body for each line of output as it comes; the script stops if it then fails | ``for line in {}`{buildCmd}` `` |
 
 Unless captured, a command's output goes where the script's goes.
 
 ### Inside the backticks
 
-- Words are literal.
-- `{expr}` inserts a value, and is always exactly **one** argument, whatever it contains. A list becomes one argument
-  per item. There is no word splitting.
-- `'…'` and `"…"` both group words with spaces, and neither expands anything. Each can contain the other. An argument
-  that needs both quote characters is built as a string and inserted with `{…}`.
+- Words are literal, and so is everything else unless the command's prefix defines value brackets or an escape
+  character (see [Choosing delimiters](#choosing-delimiters)).
+- With value brackets, `{expr}` inserts a value, and is always exactly **one** argument, whatever it contains. A list
+  becomes one argument per item. There is no word splitting.
+- `'…'` and `"…"` both group words with spaces, and neither expands anything. Each can contain the other, and a
+  longer run of quotes can contain its own quote: `''it's''`. There is no empty argument literal; insert
+  `String.empty`.
 - Nothing else, for now: no unquoted `|`, `>`, `<` or `&&`. Inside quotes they are just text, so
   `` `jq '.a | .b'` `` passes `.a | .b` as one argument.
 
@@ -101,23 +109,51 @@ includes PowerShell, where the backtick is the escape character.
 
 ### Choosing delimiters
 
-There are no escape sequences. A clash is solved by choosing other delimiters:
+By default nothing in a string or a command is special but its own closing delimiter. A clash is solved by choosing
+other delimiters, and inserting values or escaping characters is something you ask for:
 
-- **The command delimiter is a run of backticks**, as in Markdown. One is the default. A command containing a backtick
-  opens and closes with two (or more), and a shorter run inside is literal:
+- **The command delimiter is a run of backticks**, as in Markdown. A command containing a backtick opens and closes
+  with two (or more), and a shorter or longer run inside is literal:
 
   ```
   ``powershell -Command "Write-Host `"done`""``
   ```
 
-- **The value brackets are `{…}` by default.** Two characters written in front of the opening backticks become the
-  brackets for that command instead, for text full of braces such as `jq` filters, PowerShell script blocks or JSON:
+- **The string delimiter is a run of quotes**, the same way: `'''it's'''` ends at three quotes, and `'a '' b'` holds
+  two. Quotes inside a command group words by the same rule. So `''` does not mean the empty string: it opens a string
+  that ends at the next `''`. The empty string is `String.empty`. Text cannot start or end with its own quote
+  character, since the run would take it; use the other quote, or an escape character.
+
+- **A prefix defines what is special**, written right in front of the opening backticks or quote:
+
+  | Prefix | Defines | Example |
+  |---|---|---|
+  | One symbol | An escape character | `\'it\'s'` |
+  | Two characters | Value brackets | `{}"{app.name} is up"` |
+  | Two characters, then a symbol | Value brackets, then an escape character | `{}\"{name} said \"hi\""` |
+
+  Value brackets insert a value: `{}` is the usual choice, and others suit text full of braces, such as `jq` filters,
+  PowerShell script blocks, JSON or regular expressions:
 
   ```
   let names = <>`jq -r '.members[] | {name: .config}' <suiteFile>`
+  if line.matches(<>'^[0-9]{3} <name>$')
   ```
 
-  Here `<suiteFile>` inserts a value, and `{name: .config}` reaches `jq` as written.
+  Here `<suiteFile>` and `<name>` insert values, and `{name: .config}` and `{3}` arrive as written.
+
+  The brackets are either an opening bracket and its closing one (`()`, `[]`, `{}`, `<>`), or any two of the symbols
+  Koine's own syntax does not use: `~ @ $ % ^ & * + - / \ | ;`. The same symbol twice is allowed, so
+  `` %%`cmd /c echo %name%` `` inserts `name` between percent signs, much as `cmd` itself would. Inside the chosen
+  brackets, the opening one can no longer appear as text: choose a pair the text does not use, or escape it.
+
+  An escape character is one of those symbols, and not one of the brackets. It makes the character after it
+  literal, whatever that is: a quote, a backtick, a bracket, a space that would split a command's words, or the
+  escape character itself. It applies everywhere in its string or command, including inside a command's quotes. It
+  has no other meaning: `\n` is a backslash and an `n`, not a line break.
+
+  Other characters of Koine's own syntax cannot be part of a prefix, because they already mean something in front
+  of a string: `[['a']]`, `a=='x'`, `f(a,['x'])`.
 
 C# 11's raw interpolated strings do the same with `$$"""…{{x}}…"""`. Shell commands are nearly always text in another
 program's syntax, so in Koine choosing the delimiters is the norm, not an edge case.
@@ -134,7 +170,7 @@ Members work on the current directory, so `within` is how a script points them a
 within repoDirectory
   let repo = Git.getRepoDetails
   if repo.branch.name in ['master', 'main']
-    fail "Run this from develop, not {repo.branch.name}"
+    fail {}"Run this from develop, not {repo.branch.name}"
 ```
 
 ## Functions
@@ -144,7 +180,7 @@ within repoDirectory
 ```
 def latestPublished(manifest)
   if not File.exists(manifest)
-    return ''
+    return String.empty
   return (Json.read(manifest) as Manifest).latest
 ```
 
@@ -192,9 +228,9 @@ module Python
 
 def find: String
   for candidate in ['python', 'py', Path.join(Home.directory, 'anaconda3', 'python.exe')]
-    if try `{candidate} --version`
+    if try {}`{candidate} --version`
       return candidate
-  return ''
+  return String.empty
 ```
 
 ```
@@ -301,7 +337,7 @@ record Binary
 
 - **Fields are read with `.`**, and the checker knows every field, so a misspelled one is a compile error.
 - **A field marked `?` may be missing:** `linux: Platform?`. A missing field reads as the empty value of its type:
-  `''`, `0`, `false`, `[]`, or an empty record, and `.isEmpty` is true for each. A field without `?` is always
+  `String.empty`, `0`, `false`, `[]`, or an empty record, and `.isEmpty` is true for each. A field without `?` is always
   present.
 - **A record is made by naming its fields:** `Binary(name: 'app', source: 'app.exe')`. A Koine-bodied member that
   returns a record makes it this way.
@@ -406,7 +442,7 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
       # The output is checked for FAILED as well as the exit status, so a failure can never pass as a build.
       let buildCmd = Path.join(dist, 'build.cmd')
       let failed = false
-      for line in `{buildCmd}`
+      for line in {}`{buildCmd}`
         print line
         if 'FAILED' in line
           failed = true
@@ -421,20 +457,20 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
         if binary.source.endsWith('.exe')
           let exe = Path.join(Path.parent(config), binary.source)
           if not File.exists(exe)
-            dead.add("{app.id}: no {exe}")
+            dead.add({}"{app.id}: no {exe}")
           else
-            let log = Path.join(logs, "start-{binary.name}.log")
+            let log = Path.join(logs, {}"start-{binary.name}.log")
             within Path.parent(exe)
               let process = Process.start(exe, log)
               Clock.sleep(seconds)
               if process.running
-                print "  {binary.name} up"
+                print {}"  {binary.name} up"
                 process.stop
               else
-                dead.add("{binary.name} exited within {seconds}s; see logs/start-{binary.name}.log.err")
+                dead.add({}"{binary.name} exited within {seconds.text}s; see logs/start-{binary.name}.log.err")
     if not dead.isEmpty
       for problem in dead
-        Console.error("  {problem}")
+        Console.error({}"  {problem}")
       fail "An application does not start"
 
   # The Linux binaries are built in the Linux VM by build.sh, which writes logs/linux/BUILD.txt: the commit of every
@@ -452,20 +488,20 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
       let problems = linuxBuildProblems(logs, root, configs)
       while not problems.isEmpty
         for problem in problems
-          Console.warn("  {problem}")
+          Console.warn({}"  {problem}")
         print "  Build them in the Linux VM, from a terminal on its desktop, in this folder: ./build.sh"
         if not Console.interactive
           fail "The Linux build is missing, or not of these sources"
         Console.pause("  Press Enter once it has finished, to check again (Ctrl+C stops)")
         problems = linuxBuildProblems(logs, root, configs)
-      print "  built in the VM from these sources: {linuxApps.join(', ')}"
+      print {}"  built in the VM from these sources: {linuxApps.join(', ')}"
 
   step Notices
     let python = Python.find
     if python.isEmpty
       fail "No Python found (python, py, or anaconda3)"
     let notices = Path.join(dist, 'notices', 'notices.py')
-    if not try `{python} {notices} --check`
+    if not try {}`{python} {notices} --check`
       fail "The notices are out of date"
 
   if buildOnly
@@ -475,19 +511,19 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
       for config in configs
         let app = Json.read(config) as App
         let manifest = Path.join(dist, 'apps', app.id, 'manifest.json')
-        let latest = ''
+        let latest = String.empty
         if File.exists(manifest)
           latest = (Json.read(manifest) as Manifest).latest
         if latest == app.version
-          Console.warn("  {app.name} {app.version} is already published; bump it in {config} if it changed")
+          Console.warn({}"  {app.name} {app.version} is already published; bump it in {config} if it changed")
         else if latest.isEmpty
-          print "  {app.name} {app.version} (published: none)"
+          print {}"  {app.name} {app.version} (published: none)"
         else
-          print "  {app.name} {app.version} (published: {latest})"
+          print {}"  {app.name} {app.version} (published: {latest})"
 
     step Generate
       let deploy = Script.sibling('deploy')
-      if not try `{deploy}`
+      if not try {}`{deploy}`
         fail "deploy"
 
     step Diff
@@ -515,18 +551,18 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
     let problems = []
     for repo in builtFrom.keys
       let checkout = Path.join(root, repo)
-      let head = `git -C {checkout} rev-parse HEAD`
+      let head = {}`git -C {checkout} rev-parse HEAD`
       if head != builtFrom[repo]
-        problems.add("{repo}: the Linux build is of {builtFrom[repo].take(9)}, the checkout is at {head.take(9)}")
+        problems.add({}"{repo}: the Linux build is of {builtFrom[repo].take(9)}, the checkout is at {head.take(9)}")
     for config in configs
       let app = Json.read(config) as App
       if not app.linux.isEmpty
         let repo = Path.name(Path.parent(config))
         if not builtFrom.has(repo)
-          problems.add("{repo}: not in the Linux build")
+          problems.add({}"{repo}: not in the Linux build")
         for binary in app.linux.binaries
           if not File.exists(Path.join(Path.parent(config), binary.source))
-            problems.add("{app.id}: no {binary.source}")
+            problems.add({}"{app.id}: no {binary.source}")
     return problems
 
   # The fields of the JSON files this script reads; the files may hold more.
@@ -565,6 +601,9 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
 - **`for line in` a command replaces `EachLine`.** A non-zero exit still stops the script, with the step's name. The
   original instead reported `the build; see logs/`, so that message changes.
 - **`cmd /c call` is gone.** How a `.cmd` file is started on PowerShell 5.1 is the compiler's job.
+- **Only what inserts a value says so.** Every string and command that inserts one starts with `{}`; the rest are
+  plain text. `seconds` is a number, so the message converts it with `seconds.text`, and `latest` starts as
+  `String.empty`.
 - **Behaviour that changed:** the original captured `git rev-parse HEAD` ignoring its status, and reported a missing
   checkout as "at nothing". Here a capture that fails stops the script. See open question 5.
 - **The Linux check is a `def`,** as it was a function in the original, called once and again after each rebuild. It
@@ -599,7 +638,8 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
    take descriptions.
 9. **Members and actions look alike.** `process.running` reads a value and `process.stop` does something, and without
    parentheses they look the same. Shell scripts are mostly actions.
-10. **Delimiters for ordinary strings.** Strings use `{…}` too. Whether they take the same two-character prefix as
-    backticks is not settled.
+10. **Delimiters for ordinary strings: settled.** Strings and commands are plain unless a prefix defines value
+    brackets or an escape character, and both close at a run of exactly as many delimiters as opened them. See
+    [Choosing delimiters](#choosing-delimiters).
 11. **Colours.** Printing in colour is done through `Console` members. `print` might deserve a colour of its own, or
     it might not.

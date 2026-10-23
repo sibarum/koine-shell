@@ -20,7 +20,7 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
       # The output is checked for FAILED as well as the exit status, so a failure can never pass as a build.
       let buildCmd = Path.join(dist, 'build.cmd')
       let failed = false
-      for line in `{buildCmd}`
+      for line in {}`{buildCmd}`
         print line
         if 'FAILED' in line
           failed = true
@@ -35,20 +35,20 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
         if binary.source.endsWith('.exe')
           let exe = Path.join(Path.parent(config), binary.source)
           if not File.exists(exe)
-            dead.add("{app.id}: no {exe}")
+            dead.add({}"{app.id}: no {exe}")
           else
-            let log = Path.join(logs, "start-{binary.name}.log")
+            let log = Path.join(logs, {}"start-{binary.name}.log")
             within Path.parent(exe)
               let process = Process.start(exe, log)
               Clock.sleep(seconds)
               if process.running
-                print "  {binary.name} up"
+                print {}"  {binary.name} up"
                 process.stop
               else
-                dead.add("{binary.name} exited within {seconds}s; see logs/start-{binary.name}.log.err")
+                dead.add({}"{binary.name} exited within {seconds.text}s; see logs/start-{binary.name}.log.err")
     if not dead.isEmpty
       for problem in dead
-        Console.error("  {problem}")
+        Console.error({}"  {problem}")
       fail "An application does not start"
 
   # The Linux binaries are built in the Linux VM by build.sh, which writes logs/linux/BUILD.txt: the commit of every
@@ -66,20 +66,20 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
       let problems = linuxBuildProblems(logs, root, configs)
       while not problems.isEmpty
         for problem in problems
-          Console.warn("  {problem}")
+          Console.warn({}"  {problem}")
         print "  Build them in the Linux VM, from a terminal on its desktop, in this folder: ./build.sh"
         if not Console.interactive
           fail "The Linux build is missing, or not of these sources"
         Console.pause("  Press Enter once it has finished, to check again (Ctrl+C stops)")
         problems = linuxBuildProblems(logs, root, configs)
-      print "  built in the VM from these sources: {linuxApps.join(', ')}"
+      print {}"  built in the VM from these sources: {linuxApps.join(', ')}"
 
   step Notices
     let python = Python.find
     if python.isEmpty
       fail "No Python found (python, py, or anaconda3)"
     let notices = Path.join(dist, 'notices', 'notices.py')
-    if not try `{python} {notices} --check`
+    if not try {}`{python} {notices} --check`
       fail "The notices are out of date"
 
   if buildOnly
@@ -89,19 +89,19 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
       for config in configs
         let app = Json.read(config) as App
         let manifest = Path.join(dist, 'apps', app.id, 'manifest.json')
-        let latest = ''
+        let latest = String.empty
         if File.exists(manifest)
           latest = (Json.read(manifest) as Manifest).latest
         if latest == app.version
-          Console.warn("  {app.name} {app.version} is already published; bump it in {config} if it changed")
+          Console.warn({}"  {app.name} {app.version} is already published; bump it in {config} if it changed")
         else if latest.isEmpty
-          print "  {app.name} {app.version} (published: none)"
+          print {}"  {app.name} {app.version} (published: none)"
         else
-          print "  {app.name} {app.version} (published: {latest})"
+          print {}"  {app.name} {app.version} (published: {latest})"
 
     step Generate
       let deploy = Script.sibling('deploy')
-      if not try `{deploy}`
+      if not try {}`{deploy}`
         fail "deploy"
 
     step Diff
@@ -129,18 +129,18 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
     let problems = []
     for repo in builtFrom.keys
       let checkout = Path.join(root, repo)
-      let head = `git -C {checkout} rev-parse HEAD`
+      let head = {}`git -C {checkout} rev-parse HEAD`
       if head != builtFrom[repo]
-        problems.add("{repo}: the Linux build is of {builtFrom[repo].take(9)}, the checkout is at {head.take(9)}")
+        problems.add({}"{repo}: the Linux build is of {builtFrom[repo].take(9)}, the checkout is at {head.take(9)}")
     for config in configs
       let app = Json.read(config) as App
       if not app.linux.isEmpty
         let repo = Path.name(Path.parent(config))
         if not builtFrom.has(repo)
-          problems.add("{repo}: not in the Linux build")
+          problems.add({}"{repo}: not in the Linux build")
         for binary in app.linux.binaries
           if not File.exists(Path.join(Path.parent(config), binary.source))
-            problems.add("{app.id}: no {binary.source}")
+            problems.add({}"{app.id}: no {binary.source}")
     return problems
 
   # The fields of the JSON files this script reads; the files may hold more.

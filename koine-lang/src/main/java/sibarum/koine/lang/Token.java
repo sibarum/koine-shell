@@ -7,7 +7,8 @@ import java.util.Map;
  * A token. Strings and commands are lexed whole: a {@link Kind#STRING} carries its {@link #parts}, and a
  * {@link Kind#COMMAND} its {@link #words}, where the code between brackets is already lexed into tokens of its own.
  */
-record Token(Kind kind, String text, Pos pos, List<Segment> parts, List<List<Segment>> words, char open, char close) {
+record Token(Kind kind, String text, Pos pos, List<Segment> parts, List<List<Segment>> words, String quotes, char open,
+             char close, char escape) {
 
     enum Kind {
         NAME, NUMBER, STRING, COMMAND,
@@ -44,7 +45,7 @@ record Token(Kind kind, String text, Pos pos, List<Segment> parts, List<List<Seg
     }
 
     /** Text in quotes inside a command. */
-    record Quoted(String text, char quote, Pos pos) implements Segment {
+    record Quoted(String text, String quotes, Pos pos) implements Segment {
     }
 
     /** The tokens of an expression between brackets, ending with {@link Kind#EOF}. */
@@ -52,15 +53,15 @@ record Token(Kind kind, String text, Pos pos, List<Segment> parts, List<List<Seg
     }
 
     static Token of(Kind kind, String text, Pos pos) {
-        return new Token(kind, text, pos, List.of(), List.of(), '{', '}');
+        return new Token(kind, text, pos, List.of(), List.of(), "", Lexer.NONE, Lexer.NONE, Lexer.NONE);
     }
 
-    static Token string(String text, Pos pos, List<Segment> parts, char quote) {
-        return new Token(Kind.STRING, text, pos, List.copyOf(parts), List.of(), quote, quote);
+    static Token string(String text, Pos pos, List<Segment> parts, String quotes, char open, char close, char escape) {
+        return new Token(Kind.STRING, text, pos, List.copyOf(parts), List.of(), quotes, open, close, escape);
     }
 
-    static Token command(String text, Pos pos, List<List<Segment>> words, char open, char close) {
-        return new Token(Kind.COMMAND, text, pos, List.of(), List.copyOf(words), open, close);
+    static Token command(String text, Pos pos, List<List<Segment>> words, char open, char close, char escape) {
+        return new Token(Kind.COMMAND, text, pos, List.of(), List.copyOf(words), "", open, close, escape);
     }
 
     /** How the token reads in a message: {@code 'else'}, {@code a line break}. */

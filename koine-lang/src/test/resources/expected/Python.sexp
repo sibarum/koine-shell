@@ -1,6 +1,6 @@
 (module Python)
   (def find : String)
     (for candidate ['python' 'py' (call (. Path join) (. Home directory) 'anaconda3' 'python.exe')])
-      (if (try? (cmd [{candidate}] [--version])))
+      (if (try? (cmd {} [{candidate}] [--version])))
         (return candidate)
-    (return '')
+    (return (. String empty))

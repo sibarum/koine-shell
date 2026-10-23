@@ -21,8 +21,13 @@ public sealed interface Expr {
     record BoolLit(boolean value, Pos pos) implements Expr {
     }
 
-    /** A string in {@code "…"} or {@code '…'}, where {@code {expr}} inserts a value. */
-    record Str(List<Part> parts, char quote, Pos pos) implements Expr {
+    /**
+     * A string between two runs of the same {@code quotes}, such as {@code '…'} or {@code '''…'''}; there is no empty
+     * string literal. Nothing in it is special unless its prefix defined value brackets,
+     * {@code open} and {@code close}, which insert a value, or an {@code escape} character. Each is
+     * {@link Lexer#NONE} when not defined; escapes are already applied to the text.
+     */
+    record Str(List<Part> parts, String quotes, char open, char close, char escape, Pos pos) implements Expr {
         public Str {
             parts = List.copyOf(parts);
         }
@@ -92,10 +97,11 @@ public sealed interface Expr {
     }
 
     /**
-     * A literal command in backticks. As a statement it runs; as a value it captures the output. {@code open} and
-     * {@code close} are the value brackets, {@code {} } unless two characters in front of the backticks chose others.
+     * A literal command in backticks. As a statement it runs; as a value it captures the output. Like a {@link Str},
+     * it has value brackets, {@code open} and {@code close}, and an {@code escape} character only if its prefix
+     * defined them; each is {@link Lexer#NONE} otherwise.
      */
-    record Command(List<Word> words, char open, char close, Pos pos) implements Expr {
+    record Command(List<Word> words, char open, char close, char escape, Pos pos) implements Expr {
         public Command {
             words = List.copyOf(words);
         }
