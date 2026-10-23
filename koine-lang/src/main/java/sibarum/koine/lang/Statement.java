@@ -29,7 +29,7 @@ public sealed interface Statement {
         }
     }
 
-    /** Branches by OS when compiling. */
+    /** A {@code def}'s Koine body for some OSes, chosen when compiling. */
     record On(List<String> systems, List<Statement> body, Pos pos) implements Statement {
         public On {
             systems = List.copyOf(systems);
@@ -74,8 +74,21 @@ public sealed interface Statement {
     record Print(Expr message, Pos pos) implements Statement {
     }
 
-    /** A call or a literal command, for what it does. */
-    record Run(Expr expr, Pos pos) implements Statement {
+    /**
+     * A call or a literal command, for what it does. A call to a member that takes a {@code Block} has the block
+     * indented under it; {@code block} is empty otherwise.
+     */
+    record Run(Expr expr, List<Statement> block, Pos pos) implements Statement {
+        public Run {
+            block = List.copyOf(block);
+        }
+    }
+
+    /** Cleanup that ends a block, and runs however the block ends. */
+    record Finally(List<Statement> body, Pos pos) implements Statement {
+        public Finally {
+            body = List.copyOf(body);
+        }
     }
 
     /**

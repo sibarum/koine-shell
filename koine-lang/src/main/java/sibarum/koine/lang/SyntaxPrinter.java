@@ -18,7 +18,8 @@ public final class SyntaxPrinter {
         SyntaxPrinter p = new SyntaxPrinter();
         switch (file) {
             case SourceFile.Script s -> {
-                p.line(0, "(script " + s.name() + " <" + s.os() + ">" + params(s.inputs()) + ")");
+                p.line(0, "(" + (s.bootstrap() ? "bootstrap " : "") + "script " + s.name()
+                        + " <" + String.join(" ", s.systems()) + ">" + params(s.inputs()) + ")");
                 p.block(1, s.body());
             }
             case SourceFile.Module m -> {
@@ -83,7 +84,14 @@ public final class SyntaxPrinter {
             }
             case Statement.Return s -> line(depth, s.value().map(v -> "(return " + expr(v) + ")").orElse("(return)"));
             case Statement.Print s -> line(depth, "(print " + expr(s.message()) + ")");
-            case Statement.Run s -> line(depth, "(run " + expr(s.expr()) + ")");
+            case Statement.Run s -> {
+                line(depth, "(run " + expr(s.expr()) + ")");
+                block(depth + 1, s.block());
+            }
+            case Statement.Finally s -> {
+                line(depth, "(finally)");
+                block(depth + 1, s.body());
+            }
             case Statement.Def s -> {
                 line(depth, "(" + (s.bundled() ? "bundled " : "") + "def " + s.name() + params(s.parameters())
                         + s.result().map(t -> " : " + type(t)).orElse("") + ")");
@@ -142,6 +150,8 @@ public final class SyntaxPrinter {
                         + e.words().stream().map(w -> word(w, e.open(), e.close())).collect(Collectors.joining()) + ")";
             }
             case Expr.Try e -> "(try? " + expr(e.command()) + ")";
+            case Expr.OrElse e -> "(else " + expr(e.command()) + " " + expr(e.fallback()) + ")";
+            case Expr.FailWith e -> "(fail " + expr(e.message()) + ")";
         };
     }
 

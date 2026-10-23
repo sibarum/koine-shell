@@ -75,6 +75,22 @@ class ParserTest {
     }
 
     @Test
+    void aCaptureCanFallBackWithElse() {
+        assertEquals("(let head (else (cmd [git] [rev-parse] [HEAD]) 'nothing'))\n",
+                statement("let head = `git rev-parse HEAD` else 'nothing'"));
+        assertEquals("(else (cmd [python] [-V]) (else (cmd [py] [-V]) (. String empty)))",
+                expr("`python -V` else `py -V` else String.empty"));
+        assertEquals("(else (cmd {} [git] [-C] [{c}] [rev-parse] [HEAD]) (fail {}\"{c} is not a checkout\"))",
+                expr("{}`git -C {c} rev-parse HEAD` else fail {}\"{c} is not a checkout\""));
+    }
+
+    @Test
+    void elseBindsToTheCaptureBeforeIt() {
+        assertEquals("(== a (else (cmd [x]) 'y'))", expr("a == `x` else 'y'"));
+        assertEquals("(and (== (else (cmd [x]) 'y') 'z') b)", expr("`x` else 'y' == 'z' and b"));
+    }
+
+    @Test
     void anEscapeCharacterInACommandMakesAnyCharacterLiteral() {
         assertEquals("(cmd \\ [echo] [a b] [`] ['it's'])", expr("\\`echo a\\ b \\` 'it\\'s'`"));
         assertEquals("(cmd {}^ [echo] [{] [{x}] [a^b])", expr("{}^`echo ^{ {x} a^^b`"));
@@ -176,6 +192,62 @@ class ParserTest {
     }
 
     @Test
+    void theScriptLineNamesItsOSes() {
+        assertEquals("(script S <Windows> (x = 1))\n  (return)\n",
+                SyntaxPrinter.print(Parser.parse("s.koine", "script S<Windows>(x = 1)\n  return\n")));
+        assertEquals("(bootstrap script Install <Linux Mac>)\n  (print 'hi')\n",
+                SyntaxPrinter.print(Parser.parse("i.koine", "bootstrap script Install<Linux, Mac>\n  print 'hi'\n")));
+    }
+
+    @Test
+    void aMemberThatTakesABlockIsCalledWithTheBlockIndentedUnderIt() {
+        assertEquals("""
+                (module Lock)
+                  (def with (path: String, body: Block))
+                    (let lock (call acquire path))
+                    (run body)
+                    (finally)
+                      (run (call release lock))
+                  (def f)
+                    (run (call (. Lock with) 'state'))
+                      (print 'locked')
+                    (print 'free')
+                """, SyntaxPrinter.print(Parser.parse("Lock.koine", """
+                module Lock
+
+                def with(path: String, body: Block)
+                  let lock = acquire(path)
+                  body
+                  finally
+                    release(lock)
+
+                def f
+                  Lock.with('state')
+                    print 'locked'
+                  print 'free'
+                """)));
+    }
+
+    @Test
+    void aDefCanBranchByOSInKoine() {
+        assertEquals("""
+                (script S <OS>)
+                  (def build)
+                    (on Windows)
+                      (run (cmd [build.cmd]))
+                    (on Linux Mac)
+                      (run (cmd [./build.sh]))
+                """, SyntaxPrinter.print(Parser.parse("s.koine", """
+                script S<OS>
+                  def build
+                    on Windows
+                      `build.cmd`
+                    on Linux, Mac
+                      `./build.sh`
+                """)));
+    }
+
+    @Test
     void aNativeBodyIsTakenAsItIsUpToWhereTheIndentationEnds() {
         assertEquals("""
                 (module M)
@@ -222,6 +294,12 @@ class ParserTest {
         assertError("s.koine:2:9: the escape character % is one of the value brackets; choose another",
                 "script S<OS>\n  print %%%'a'\n");
         assertError("s.koine:2:3: native goes directly in a def's body", "script S<OS>\n  native Windows\n    x\n");
+        assertError("s.koine:2:3: on goes directly in a def's body", "script S<OS>\n  on Windows\n    x\n");
+        assertError("s.koine:4:7: on goes directly in a def's body",
+                "script S<OS>\n  def f\n    if a\n      on Windows\n        x\n");
+        assertError("s.koine:3:3: finally is the last thing in its block",
+                "script S<OS>\n  x\n  finally\n    y\n  z\n");
+        assertError("s.koine:1:1: a file starts with script, bootstrap script or module", "let x = 1\n");
         assertError("s.koine:3:3: native Windows has no body", "module M\ndef f\n  native Windows\n");
         assertError("s.koine:2:3: only a name, or an item such as map[key], can be assigned",
                 "script S<OS>\n  a.b = 1\n");

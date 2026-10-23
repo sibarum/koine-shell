@@ -1,10 +1,7 @@
 # Everything before publishing: builds the stack, starts every application, checks the notices and versions, and
 # generates the installers without publishing them. Nothing is uploaded, committed or pushed. Stops at the first
-# failing step.
-script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
-  on Linux, Mac
-    fail "Preflight runs on Windows: it builds and starts the Windows applications"
-
+# failing step. It builds and starts the Windows applications, so it is for Windows only.
+script Preflight<Windows>(skipBuild = false, seconds = 8, buildOnly = false)
   let dist = Script.directory
   let root = Path.parent(dist)
   let logs = Path.join(dist, 'logs')
@@ -84,34 +81,35 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
 
   if buildOnly
     Console.success("Built, started and checked.")
-  else
-    step Versions
-      for config in configs
-        let app = Json.read(config) as App
-        let manifest = Path.join(dist, 'apps', app.id, 'manifest.json')
-        let latest = String.empty
-        if File.exists(manifest)
-          latest = (Json.read(manifest) as Manifest).latest
-        if latest == app.version
-          Console.warn({}"  {app.name} {app.version} is already published; bump it in {config} if it changed")
-        else if latest.isEmpty
-          print {}"  {app.name} {app.version} (published: none)"
-        else
-          print {}"  {app.name} {app.version} (published: {latest})"
+    return
 
-    step Generate
-      let deploy = Script.sibling('deploy')
-      if not try {}`{deploy}`
-        fail "deploy"
+  step Versions
+    for config in configs
+      let app = Json.read(config) as App
+      let manifest = Path.join(dist, 'apps', app.id, 'manifest.json')
+      let latest = String.empty
+      if File.exists(manifest)
+        latest = (Json.read(manifest) as Manifest).latest
+      if latest == app.version
+        Console.warn({}"  {app.name} {app.version} is already published; bump it in {config} if it changed")
+      else if latest.isEmpty
+        print {}"  {app.name} {app.version} (published: none)"
+      else
+        print {}"  {app.name} {app.version} (published: {latest})"
 
-    step Diff
-      within dist
+  step Generate
+    let deploy = Script.sibling('deploy')
+    if not try {}`{deploy}`
+      fail "deploy"
+
+  step Diff
+    within dist
+      try `git status --short`
+    let site = Path.join(root, 'sibarum.github.io')
+    if File.exists(Path.join(site, '.git'))
+      within site
         try `git status --short`
-      let site = Path.join(root, 'sibarum.github.io')
-      if File.exists(Path.join(site, '.git'))
-        within site
-          try `git status --short`
-      Console.success("Preflight passed. Look at git diff here (and in ../sibarum.github.io), then deploy -Publish.")
+    Console.success("Preflight passed. Look at git diff here (and in ../sibarum.github.io), then deploy -Publish.")
 
   # What is wrong with the Linux build: missing, not of the commits checked out here, or without a binary an
   # application needs. Empty when it is fit to publish.
@@ -129,7 +127,7 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
     let problems = []
     for repo in builtFrom.keys
       let checkout = Path.join(root, repo)
-      let head = {}`git -C {checkout} rev-parse HEAD`
+      let head = {}`git -C {checkout} rev-parse HEAD` else 'nothing'
       if head != builtFrom[repo]
         problems.add({}"{repo}: the Linux build is of {builtFrom[repo].take(9)}, the checkout is at {head.take(9)}")
     for config in configs

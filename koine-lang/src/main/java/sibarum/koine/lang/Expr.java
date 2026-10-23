@@ -110,4 +110,12 @@ public sealed interface Expr {
     /** {@code try `…`} in a condition: true if the command succeeds. */
     record Try(Command command, Pos pos) implements Expr {
     }
+
+    /** {@code `…` else fallback}: the command's output, or the fallback if it fails. */
+    record OrElse(Command command, Expr fallback, Pos pos) implements Expr {
+    }
+
+    /** {@code fail message}, as the fallback of an {@link OrElse}: the only place {@code fail} is a value. */
+    record FailWith(Expr message, Pos pos) implements Expr {
+    }
 }

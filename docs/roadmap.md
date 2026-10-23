@@ -15,8 +15,11 @@ the native code. The first use is deployment and installer scripts; a REPL comes
   may use only the native tier, and the compiler refuses a bootstrap script that uses a bundled member.
 - **The bottom layer stays:** the PowerShell, Bash and Zsh IRs (`koine-ir-ps`, `koine-ir-bash`,
   `koine-ir-zsh`) and their printers. What each shell needs from them is in [targets.md](targets.md).
-- **Not doing:** function inlining (functions are real functions, and only the module functions a script uses are
-  emitted) and macros.
+- **Everything is cross-platform.** Every standard-library member covers all three OSes. A script narrows its OSes in
+  its script line, and anything done per OS is a `def` of its own with `on` and `native` bodies.
+- **Not doing:** macros, or function inlining in general (functions are real functions, and only the module functions
+  a script uses are emitted). The one exception is a member that takes a block, which is expanded where it is called,
+  in the syntax tree.
 
 ## The plan
 
@@ -26,9 +29,12 @@ the native code. The first use is deployment and installer scripts; a REPL comes
    - What reading data returns. *Proposed:* a declared record. Koine's own files are
      [nanobuf](https://github.com/sibarum/intrabuf/blob/develop/docs/nanobuf.md), native on every OS; `Json.read` is
      native only on Windows, and `Json.write` everywhere, for files other programs own.
-   - Cleanup that runs even on failure. `within` already promises it.
-   - Capturing output without failing, and ending early with success (open questions 5 and 6).
-   - Declaring the OSes a script supports, and marking it as a bootstrap script (open question 7).
+   - Cleanup that runs even on failure. *Settled:* `finally`, which also lets members take a block; `within` and
+     `step` become such members.
+   - Capturing output without failing, and ending early with success (open questions 5 and 6). *Settled:* `else`
+     after a capture, and `return` at the script's level.
+   - Declaring the OSes a script supports, and marking it as a bootstrap script (open question 7). *Settled:*
+     `script Preflight<Windows>`, `bootstrap script`.
 2. **A parser and checker** for the language, with preflight as the first test. *The parser is done:*
    `koine-lang` reads scripts and modules into a syntax tree, and parses preflight and the `Python`, `Clock` and
    `Process` examples. The checker is next.

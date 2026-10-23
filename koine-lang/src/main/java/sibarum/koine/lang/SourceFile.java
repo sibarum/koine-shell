@@ -10,12 +10,13 @@ public sealed interface SourceFile {
     Pos pos();
 
     /**
-     * {@code script Name<OS>(inputs)} and its body. {@code os} is the name between the angle brackets, which the
-     * script's {@code on} branches are about.
+     * {@code script Name<OS>(inputs)} and its body. {@code systems} are the names between the angle brackets as
+     * written: {@code OS} for all three, or the OSes the script is for. A {@code bootstrap} script is an installer.
      */
-    record Script(String name, String os, List<Statement.Param> inputs, List<Statement> body, Pos pos)
-            implements SourceFile {
+    record Script(String name, List<String> systems, boolean bootstrap, List<Statement.Param> inputs,
+                  List<Statement> body, Pos pos) implements SourceFile {
         public Script {
+            systems = List.copyOf(systems);
             inputs = List.copyOf(inputs);
             body = List.copyOf(body);
         }

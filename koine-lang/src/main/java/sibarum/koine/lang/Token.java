@@ -19,20 +19,20 @@ record Token(Kind kind, String text, Pos pos, List<Segment> parts, List<List<Seg
         LPAREN, RPAREN, LBRACKET, RBRACKET, LBRACE, RBRACE, COMMA, DOT, COLON, QUESTION, ASSIGN,
         EQ, NE, LT, LE, GT, GE,
 
-        SCRIPT, MODULE, LET, IF, ELSE, ON, FOR, IN, WHILE, WITHIN, TRY, FAIL, STEP, DEF, RETURN, PRINT, RECORD,
-        NATIVE, BUNDLED, AS, AND, OR, NOT, TRUE, FALSE
+        SCRIPT, BOOTSTRAP, MODULE, LET, IF, ELSE, ON, FOR, IN, WHILE, WITHIN, TRY, FAIL, STEP, DEF, RETURN, FINALLY,
+        PRINT, RECORD, NATIVE, BUNDLED, AS, AND, OR, NOT, TRUE, FALSE
     }
 
     static final Map<String, Kind> KEYWORDS = Map.ofEntries(
-            Map.entry("script", Kind.SCRIPT), Map.entry("module", Kind.MODULE), Map.entry("let", Kind.LET),
-            Map.entry("if", Kind.IF), Map.entry("else", Kind.ELSE), Map.entry("on", Kind.ON),
+            Map.entry("script", Kind.SCRIPT), Map.entry("bootstrap", Kind.BOOTSTRAP), Map.entry("module", Kind.MODULE),
+            Map.entry("let", Kind.LET), Map.entry("if", Kind.IF), Map.entry("else", Kind.ELSE), Map.entry("on", Kind.ON),
             Map.entry("for", Kind.FOR), Map.entry("in", Kind.IN), Map.entry("while", Kind.WHILE),
             Map.entry("within", Kind.WITHIN), Map.entry("try", Kind.TRY), Map.entry("fail", Kind.FAIL),
             Map.entry("step", Kind.STEP), Map.entry("def", Kind.DEF), Map.entry("return", Kind.RETURN),
-            Map.entry("print", Kind.PRINT), Map.entry("record", Kind.RECORD), Map.entry("native", Kind.NATIVE),
-            Map.entry("bundled", Kind.BUNDLED), Map.entry("as", Kind.AS), Map.entry("and", Kind.AND),
-            Map.entry("or", Kind.OR), Map.entry("not", Kind.NOT), Map.entry("true", Kind.TRUE),
-            Map.entry("false", Kind.FALSE));
+            Map.entry("finally", Kind.FINALLY), Map.entry("print", Kind.PRINT), Map.entry("record", Kind.RECORD),
+            Map.entry("native", Kind.NATIVE), Map.entry("bundled", Kind.BUNDLED), Map.entry("as", Kind.AS),
+            Map.entry("and", Kind.AND), Map.entry("or", Kind.OR), Map.entry("not", Kind.NOT),
+            Map.entry("true", Kind.TRUE), Map.entry("false", Kind.FALSE));
 
     /** A piece of a string or of a command's word. */
     sealed interface Segment {

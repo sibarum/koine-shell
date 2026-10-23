@@ -25,7 +25,7 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
   ...
 ```
 
-`script` gives the name, the `<OS>` parameter and the inputs, with defaults. The compiler produces one script per OS:
+`script` gives the name, the OSes it is for and the inputs, with defaults. The compiler produces one script per OS:
 
 | OS | Shell | Output |
 |---|---|---|
@@ -33,31 +33,57 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
 | Linux | Bash 4.4+ | `preflight.sh` |
 | Mac | Zsh | `preflight.zsh` |
 
-`on` branches by OS when compiling. Each output contains only its own branch, and nothing checks the OS at runtime:
+`<OS>` means all three. A script that only makes sense on some names them instead: `script Preflight<Windows>(…)`
+or `script Package<Linux, Mac>`. The compiler produces only those outputs, so a script never has to fail at runtime
+for being on the wrong OS.
+
+An installer is marked `bootstrap script Install<OS>(…)`. It runs on machines that do not have Koine's bundle yet, so
+it may use only native-tier members (see [Tiers](#tiers)).
+
+### Everything is cross-platform; your own code may not be
+
+The language and its standard library work the same on every OS. Every standard-library member has a body for all
+three, and the compiler refuses one that does not. Where a script needs something done differently per OS, it says so
+in a `def` of its own, with a body per OS: Koine under `on`, or the shell's own language under `native` (see [Native
+bodies](#native-bodies)):
 
 ```
-on Windows
-  `build.cmd`
-on Linux, Mac
-  `./build.sh`
+def build(dist: String)
+  on Windows
+    {}`{Path.join(dist, 'build.cmd')}`
+  on Linux, Mac
+    {}`{Path.join(dist, 'build.sh')}`
 ```
+
+`on` and `native` appear only there, as a `def`'s whole body, so the story itself always reads the same for every OS.
+Each output contains only its own branch, and nothing checks the OS at runtime. A function that proves useful beyond
+one script moves into a module next to the scripts that use it.
+
+There are no macros. A macro pastes shell text into its caller, and then has to answer whose variables it sees, how
+values are quoted in and out, and what becomes of Bash's `local` and PowerShell's stray output. Rules 1–5 under
+[Functions](#functions) answer those questions for a `def`, so a `def` with per-OS bodies is the escape hatch.
 
 ## Keywords
 
 | Keyword | Role |
 |---|---|
-| `script` | Declares the script: its name, `<OS>`, and its inputs with defaults. |
+| `script` | Declares the script: its name, its OSes, and its inputs with defaults. `bootstrap script` marks an installer. |
 | `let` | Introduces a name. Plain `x = …` reassigns one that exists, so a misspelled name is an error, not a new variable. A name lives until the end of its block. |
-| `if` / `else` | Branches at runtime. `else if` chains. |
-| `on` | Branches at compile time, by OS. |
+| `if` / `else` | Branches at runtime. `else if` chains. `else` after a captured command gives a value if the command fails (see [Literal commands](#literal-commands)). |
+| `on` | Gives a `def` a Koine body for some OSes. Chosen when compiling. |
 | `for … in` | Loops over a list, or over the lines of a command's output as they come. |
 | `while` | Loops while a condition holds. |
 | `within` | Runs a block in a directory and restores the previous one afterwards, even on failure. It is the only way to change the working directory. |
 | `try` | Before a literal command: gives true or false instead of stopping the script. As a statement on its own: runs the command and ignores its exit status. |
-| `fail` | Prints the message in red, exits non-zero, and runs any cleanup. |
+| `fail` | Prints the message in red, runs any cleanup, and exits non-zero. |
 | `step` | A named part of the story. It announces itself when it starts (`== Build`), and a failure inside it is reported with its name. |
 | `def` | Defines a function: a quiet helper that takes arguments and can return a value. See [Functions](#functions). |
-| `return` | Ends a function, optionally with its result. |
+| `return` | Ends a function, optionally with its result. At the script's top level it ends the script successfully, running any cleanup. |
+| `finally` | Ends a block with cleanup that runs however the block ends. See [Cleanup](#cleanup). |
+| `native` | Gives a `def` a body in the shell's own language for some OSes. See [Native bodies](#native-bodies). |
+
+`within` and `step` are written as keywords, but each is defined by a member that takes a block, in the standard
+library (see [Members that take a block](#members-that-take-a-block)). The compiler has nothing special for them.
 | `print` | Writes a line. |
 
 Operators: `and`, `or`, `not`, `in` (list membership and substring), `==`, `!=`, `<`, `<=`, `>`, `>=`.
@@ -85,12 +111,31 @@ A literal command goes in backticks. Where it appears decides what it does:
 | Where it appears | What it does | Example |
 |---|---|---|
 | As a statement | Runs it; the script stops if it fails | `` `build.cmd` `` |
-| As a value | Captures its output, without trailing line breaks | ``let head = `git rev-parse HEAD` `` |
+| As a value | Captures its output, without trailing line breaks; the script stops if it fails | ``let head = `git rev-parse HEAD` `` |
+| As a value, then `else` | Captures its output, or gives the value after `else` if it fails | ``let head = `git rev-parse HEAD` else 'nothing'`` |
 | After `try` in a condition | Gives true or false | ``if not try {}`{python} {notices} --check` `` |
 | `try` as a statement | Runs it and ignores its exit status | ``try `git status --short` `` |
 | After `for … in` | Runs the body for each line of output as it comes; the script stops if it then fails | ``for line in {}`{buildCmd}` `` |
 
 Unless captured, a command's output goes where the script's goes.
+
+### When a capture fails
+
+`else` comes directly after a captured command, on the same line, and gives the value to use if the command fails:
+
+```
+let head = {}`git -C {checkout} rev-parse HEAD` else 'nothing'
+let python = `python --version` else `py --version` else String.empty
+let head = {}`git -C {checkout} rev-parse HEAD` else fail {}"{repo} is not a checkout"
+```
+
+- The fallback can be another capture, so fallbacks chain, or `fail` with a better message than the script's own.
+- `else` binds to the capture before it and nothing else: ``a == `x` else 'y'`` compares `a` with the capture or `'y'`.
+- The failed command's error output still reaches the console; only its exit status is ignored.
+- `try` is not used for this, because ``let x = try `cmd` `` would leave it unclear whether `x` is the output or the
+  bool. Something that needs both the output and the exit status calls a member that returns a record of them.
+
+On Bash and Zsh this is `head=$(…) || head='nothing'`; on PowerShell, the capture and a test of `$LASTEXITCODE`.
 
 ### Inside the backticks
 
@@ -214,6 +259,22 @@ does not capture becomes part of its result. These rules make functions safe on 
 A function is defined at the script's top level, and can be called before the line that defines it: the compiler
 moves every definition to the top of the output.
 
+### Ending the script early
+
+The script line reads like a signature, and `return` ends the script the way it ends a function: successfully, after
+running any cleanup.
+
+```
+if buildOnly
+  Console.success("Built, started and checked.")
+  return
+```
+
+- At the script's level `return` takes no value. Failing is `fail`'s job, and a script has no result.
+- Inside a `def`, `return` still ends only the function. Only `fail` stops the script from inside one (rule 4).
+- For now, `return` cannot appear inside a block given to a member, and so not inside `within` or `step` either (see
+  [Members that take a block](#members-that-take-a-block)).
+
 ## Modules
 
 *Proposed. This answers open question 1.*
@@ -270,9 +331,10 @@ raised on its own: `bundled def search(…)`, and so can one OS's branch of a me
 
 ### Native bodies
 
-`native` takes the same OS list as `on`. A member's body is either Koine, or a set of branches by OS, each of which is
-`on` (Koine) or `native` (shell). Every OS the script is compiled for must be covered, or the compiler says which one
-is missing: `Clock.sleep has no Linux body`.
+`native` takes the same OS list as `on`. A `def`'s body, in a module or a script alike, is either Koine, or a set of
+branches by OS, each of which is `on` (Koine) or `native` (shell). Every OS the script is compiled for must be
+covered, or the compiler says which one is missing: `Clock.sleep has no Linux body`. A standard-library member must
+cover all three.
 
 A native body is raw text. It ends where the indentation does, and nothing in it is interpreted, so it needs no
 delimiters and no escaping. The compiler copies it into the function it generates, and does not check it, quote it
@@ -322,6 +384,84 @@ declares the value's record. The members of strings, lists and maps (`.endsWith`
 `.isEmpty`, `.keys`, `.has`, `.matches`) are written the same way, in the built-in modules `String`, `List` and `Map`.
 Members that change a value in place, such as `list.add(x)` and `map[key] = x`, are built into the compiler instead,
 because a function cannot change what it was passed (rule 3).
+
+A native body is a leaf: it never holds Koine and never calls back into it. Where native code has to come before and
+after some Koine, the member is written in Koine and calls native members for those parts; see the next section.
+
+### Members that take a block
+
+A member can take a block of the caller's code, the way `within` does. It declares a parameter of type `Block`, runs
+it by naming it, and is called with the block indented under the call:
+
+```
+module Lock
+
+record Lock
+  path: String
+
+def acquire(path: String): Lock
+  native Windows
+    …
+  native Linux, Mac
+    …
+
+def release(lock: Lock)
+  native Windows
+    …
+  native Linux, Mac
+    …
+
+def with(path: String, body: Block)
+  let lock = acquire(path)
+  body
+  finally
+    release(lock)
+```
+
+```
+Lock.with(stateFile)
+  let state = Nanobuf.read(stateFile) as State
+  Nanobuf.write(stateFile, state)
+```
+
+Shells have no closures to pass a block as: Bash has none, and faking them with `eval` or with functions that see the
+caller's locals brings back every scoping and quoting problem the rules for functions exist to avoid. So the
+compiler expands a member that takes a block where it is called, in the syntax tree:
+
+1. **The member's body is copied into the caller,** with its own locals renamed so they cannot clash, and the caller's
+   block goes where the member names it. What comes out is ordinary Koine, and is compiled like the rest; nothing is
+   pasted together as text.
+2. **The block is the caller's code.** It sees and assigns the caller's variables, and `fail` in it stops the script.
+3. **A `Block` can only be run, or passed straight on** to another member that takes one. It cannot be stored,
+   returned or put in a list, so the compiler always knows every block.
+4. **A member that takes a block cannot call itself,** directly or through others, since expanding it would never end.
+   It may run its block more than once, in a loop.
+5. **No `return` inside a block,** for now. Leaving the caller from inside an expanded body, through its `finally`, can
+   come later.
+
+This is the one place functions are expanded rather than called. Every other `def` stays a real function.
+
+`within` and `step` are members like this, in the standard library: `within` is a native push of the directory, the
+block, and a native pop under `finally`; `step` announces itself, runs the block, and reports a failure with its name.
+Their keyword spelling is all that is special about them.
+
+### Cleanup
+
+`finally` ends a block with cleanup that runs however the block ends: normally, through `fail`, or through a failing
+command.
+
+```
+let server = Process.start(exe, log)
+Http.waitFor(url)
+finally
+  server.stop
+```
+
+- `finally` is the last thing in its block, at the block's own indentation, and its own block follows.
+- **PowerShell:** `try { … } finally { … }`.
+- **Bash and Zsh:** the compiler keeps a stack of cleanups, run by an `EXIT` trap. On the normal path it pops the top
+  one and runs it itself.
+- `fail`, `koine_fail` and a script-level `return` run everything on the stack, innermost first.
 
 ## Records
 
@@ -422,11 +562,8 @@ rewritten in this language:
 ```
 # Everything before publishing: builds the stack, starts every application, checks the notices and versions, and
 # generates the installers without publishing them. Nothing is uploaded, committed or pushed. Stops at the first
-# failing step.
-script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
-  on Linux, Mac
-    fail "Preflight runs on Windows: it builds and starts the Windows applications"
-
+# failing step. It builds and starts the Windows applications, so it is for Windows only.
+script Preflight<Windows>(skipBuild = false, seconds = 8, buildOnly = false)
   let dist = Script.directory
   let root = Path.parent(dist)
   let logs = Path.join(dist, 'logs')
@@ -506,34 +643,35 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
 
   if buildOnly
     Console.success("Built, started and checked.")
-  else
-    step Versions
-      for config in configs
-        let app = Json.read(config) as App
-        let manifest = Path.join(dist, 'apps', app.id, 'manifest.json')
-        let latest = String.empty
-        if File.exists(manifest)
-          latest = (Json.read(manifest) as Manifest).latest
-        if latest == app.version
-          Console.warn({}"  {app.name} {app.version} is already published; bump it in {config} if it changed")
-        else if latest.isEmpty
-          print {}"  {app.name} {app.version} (published: none)"
-        else
-          print {}"  {app.name} {app.version} (published: {latest})"
+    return
 
-    step Generate
-      let deploy = Script.sibling('deploy')
-      if not try {}`{deploy}`
-        fail "deploy"
+  step Versions
+    for config in configs
+      let app = Json.read(config) as App
+      let manifest = Path.join(dist, 'apps', app.id, 'manifest.json')
+      let latest = String.empty
+      if File.exists(manifest)
+        latest = (Json.read(manifest) as Manifest).latest
+      if latest == app.version
+        Console.warn({}"  {app.name} {app.version} is already published; bump it in {config} if it changed")
+      else if latest.isEmpty
+        print {}"  {app.name} {app.version} (published: none)"
+      else
+        print {}"  {app.name} {app.version} (published: {latest})"
 
-    step Diff
-      within dist
+  step Generate
+    let deploy = Script.sibling('deploy')
+    if not try {}`{deploy}`
+      fail "deploy"
+
+  step Diff
+    within dist
+      try `git status --short`
+    let site = Path.join(root, 'sibarum.github.io')
+    if File.exists(Path.join(site, '.git'))
+      within site
         try `git status --short`
-      let site = Path.join(root, 'sibarum.github.io')
-      if File.exists(Path.join(site, '.git'))
-        within site
-          try `git status --short`
-      Console.success("Preflight passed. Look at git diff here (and in ../sibarum.github.io), then deploy -Publish.")
+    Console.success("Preflight passed. Look at git diff here (and in ../sibarum.github.io), then deploy -Publish.")
 
   # What is wrong with the Linux build: missing, not of the commits checked out here, or without a binary an
   # application needs. Empty when it is fit to publish.
@@ -551,7 +689,7 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
     let problems = []
     for repo in builtFrom.keys
       let checkout = Path.join(root, repo)
-      let head = {}`git -C {checkout} rev-parse HEAD`
+      let head = {}`git -C {checkout} rev-parse HEAD` else 'nothing'
       if head != builtFrom[repo]
         problems.add({}"{repo}: the Linux build is of {builtFrom[repo].take(9)}, the checkout is at {head.take(9)}")
     for config in configs
@@ -604,8 +742,11 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
 - **Only what inserts a value says so.** Every string and command that inserts one starts with `{}`; the rest are
   plain text. `seconds` is a number, so the message converts it with `seconds.text`, and `latest` starts as
   `String.empty`.
-- **Behaviour that changed:** the original captured `git rev-parse HEAD` ignoring its status, and reported a missing
-  checkout as "at nothing". Here a capture that fails stops the script. See open question 5.
+- **It is for Windows only, and says so in the script line:** `Preflight<Windows>`. Only `preflight.ps1` is produced,
+  and nothing checks the OS at runtime.
+- **`return` ends it early, successfully,** when `buildOnly` is set, so the steps after it stay at the top level.
+- **A missing checkout reads as "at nothing",** as in the original: the `git rev-parse HEAD` capture falls back with
+  `else 'nothing'` instead of stopping the script.
 - **The Linux check is a `def`,** as it was a function in the original, called once and again after each rebuild. It
   is defined at the end, so the story reads first and the detail comes after. Its result is a list of strings, which
   rule 5 allows; the map it builds stays inside it.
@@ -628,12 +769,13 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
    keyword or a library member.
 4. **What happens to the portable IR.** It could become this language's target, or be replaced by something much
    smaller. Listing what the preflight example actually needs from it would answer this.
-5. **Capturing without failing.** `try` gives a bool, so there is no way yet to capture output and ignore the exit
-   status, as the original's `git rev-parse` did.
-6. **Ending early with success.** `buildOnly` wraps the rest of the script in an `else`, because there is no keyword
-   for "stop here, successfully".
-7. **Which OSes a script supports.** Preflight is Windows-only and says so with `on Linux, Mac` and `fail`. It might be
-   better to name the supported OSes in the script line, so the other outputs are never produced.
+5. **Capturing without failing: settled.** `else` after a capture gives a value, or `fail` with a message, if the
+   command fails. See [When a capture fails](#when-a-capture-fails).
+6. **Ending early with success: settled.** `return` at the script's level. See [Ending the script
+   early](#ending-the-script-early).
+7. **Which OSes a script supports: settled.** The script line names them, `<OS>` for all three, and `bootstrap script`
+   marks an installer. The standard library covers every OS, and anything per OS is a `def` of the script's own with
+   `on` and `native` bodies; there are no macros. See [Scripts and targets](#scripts-and-targets).
 8. **Help text for script inputs.** The original documents each parameter. Comments could carry it, or `script` could
    take descriptions.
 9. **Members and actions look alike.** `process.running` reads a value and `process.stop` does something, and without
@@ -643,3 +785,5 @@ script Preflight<OS>(skipBuild = false, seconds = 8, buildOnly = false)
     [Choosing delimiters](#choosing-delimiters).
 11. **Colours.** Printing in colour is done through `Console` members. `print` might deserve a colour of its own, or
     it might not.
+12. **`return` inside a block given to a member.** Not allowed for now; see [Members that take a
+    block](#members-that-take-a-block).

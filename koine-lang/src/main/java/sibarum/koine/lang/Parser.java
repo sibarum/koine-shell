@@ -37,20 +37,22 @@ public final class Parser {
     }
 
     private SourceFile file() {
-        if (at(Kind.SCRIPT)) return script();
+        if (at(Kind.SCRIPT) || at(Kind.BOOTSTRAP)) return script();
         if (at(Kind.MODULE)) return module();
-        throw error(peek(), "a file starts with script or module");
+        throw error(peek(), "a file starts with script, bootstrap script or module");
     }
 
     private SourceFile.Script script() {
-        Pos at = expect(Kind.SCRIPT, "script").pos();
+        Pos at = peek().pos();
+        boolean bootstrap = accept(Kind.BOOTSTRAP);
+        expect(Kind.SCRIPT, bootstrap ? "script after bootstrap" : "script");
         String name = name("the script's name");
-        expect(Kind.LT, "<OS> after the script's name");
-        String os = name("the name of the OS parameter");
+        expect(Kind.LT, "<OS>, or the OSes the script is for, after its name");
+        List<String> systems = systems();
         expect(Kind.GT, ">");
         List<Statement.Param> inputs = at(Kind.LPAREN) ? parameters() : List.of();
         endOfLine();
-        return new SourceFile.Script(name, os, inputs, block(false), at);
+        return new SourceFile.Script(name, systems, bootstrap, inputs, block(false), at);
     }
 
     private SourceFile.Module module() {
@@ -70,16 +72,24 @@ public final class Parser {
 
     // ---- statements ---------------------------------------------------------------------------------------------
 
-    /** An indented block. {@code native} branches are allowed only directly in a {@code def}'s body. */
-    private List<Statement> block(boolean nativeAllowed) {
+    /**
+     * An indented block. {@code on} and {@code native} branches are allowed only directly in a {@code def}'s body, and
+     * {@code finally} only last.
+     */
+    private List<Statement> block(boolean branchesAllowed) {
         expect(Kind.INDENT, "an indented block");
         List<Statement> body = new ArrayList<>();
-        while (!at(Kind.DEDENT) && !at(Kind.EOF)) body.add(statement(nativeAllowed));
+        while (!at(Kind.DEDENT) && !at(Kind.EOF)) {
+            Statement s = statement(branchesAllowed);
+            if (!body.isEmpty() && body.getLast() instanceof Statement.Finally f)
+                throw new KoineException(source, f.pos(), "finally is the last thing in its block");
+            body.add(s);
+        }
         expect(Kind.DEDENT, "the end of the block");
         return body;
     }
 
-    private Statement statement(boolean nativeAllowed) {
+    private Statement statement(boolean branchesAllowed) {
         Token t = peek();
         Pos at = t.pos();
         switch (t.kind()) {
@@ -95,6 +105,7 @@ public final class Parser {
                 return ifStatement();
             }
             case ON -> {
+                if (!branchesAllowed) throw error(t, "on goes directly in a def's body");
                 advance();
                 List<String> systems = systems();
                 endOfLine();
@@ -144,6 +155,11 @@ public final class Parser {
                 endOfLine();
                 return new Statement.Return(value, at);
             }
+            case FINALLY -> {
+                advance();
+                endOfLine();
+                return new Statement.Finally(block(false), at);
+            }
             case PRINT -> {
                 advance();
                 Expr message = expr();
@@ -157,7 +173,7 @@ public final class Parser {
                 return record();
             }
             case NATIVE -> {
-                if (!nativeAllowed) throw error(t, "native goes directly in a def's body");
+                if (!branchesAllowed) throw error(t, "native goes directly in a def's body");
                 return nativeBranch();
             }
             case ELSE -> throw error(t, "else without an if before it");
@@ -172,7 +188,7 @@ public final class Parser {
                     return new Statement.Assign(e, value, at);
                 }
                 endOfLine();
-                return new Statement.Run(e, at);
+                return new Statement.Run(e, at(Kind.INDENT) ? block(false) : List.of(), at);
             }
         }
     }
@@ -396,7 +412,12 @@ public final class Parser {
                 return string(t);
             }
             case COMMAND -> {
-                return command("a command");
+                Expr.Command command = command("a command");
+                if (!at(Kind.ELSE)) return command;
+                advance();
+                Pos failAt = peek().pos();
+                Expr fallback = accept(Kind.FAIL) ? new Expr.FailWith(expr(), failAt) : postfix();
+                return new Expr.OrElse(command, fallback, at);
             }
             case TRY -> {
                 advance();
