@@ -20,9 +20,26 @@ function Test-Succeeds([string]$Program, [object[]]$Arguments = @(), [switch]$Qu
     $ErrorActionPreference = 'Continue'
     $global:LASTEXITCODE = 0
     try {
-        if ($Quiet) { & $Program @Arguments *> $null } else { & $Program @Arguments | Out-Host }
+        if ($Quiet) {
+            Invoke-Program $Program $Arguments *> $null
+        } else {
+            Invoke-Program $Program $Arguments | Out-Host
+        }
     } catch { return $false }
     $LASTEXITCODE -eq 0
+}
+
+# Runs a batch file through cmd /c call, since cmd /c alone can report success from one that ran exit /b 1,
+# and any other program with its arguments as its C runtime reads them. A program named by a value runs here.
+function Invoke-Program([string]$Program, [object[]]$Arguments = @()) {
+    if ($Program -match '\.(cmd|bat)$') {
+        $commandLine = 'call "' + $Program + '"'
+        foreach ($a in $Arguments) { $commandLine += ' "' + [string]$a + '"' }
+        cmd /c $commandLine
+    } else {
+        $native = @(ConvertTo-NativeArgument $Arguments)
+        & $Program @native
+    }
 }
 
 # An argument as a program's C runtime reads it back. Windows PowerShell passes an empty argument as nothing
@@ -53,11 +70,13 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 where.exe git
 cmd /c 'echo "as it is"'
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Invoke-Program 'build.cmd' @('all', $quoted)
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $git = 'git'
 $global:LASTEXITCODE = 0
-& $git 'a b' (ConvertTo-NativeArgument $quoted)
+Invoke-Program $git @('a b', $quoted)
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-if (Test-Succeeds 'git' @('-C', (ConvertTo-NativeArgument $Dir), 'status') -Quiet) {
+if (Test-Succeeds 'git' @('-C', $Dir, 'status') -Quiet) {
     Write-Host 'status: True'
 } else {
     Write-Host 'status: False'

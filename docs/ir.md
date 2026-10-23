@@ -125,9 +125,8 @@ status for a `Bool`; the caller copies it at once. Koine functions use the same 
   the file and the field; `koine_as_<Record>` and the `jq` reads are where that goes.
 - **Zsh's cleanup on `exit`.** Bash's `EXIT` trap was tried, and sees the locals of the function that called `exit`.
   Zsh's has not been, and a cleanup that reads a caller's local, such as `Script.runStep`'s, needs it to.
-- **A `.cmd` file on PowerShell** is run as `& $file`. The hand-written preflight ran `cmd /c "call …"`, since
-  `cmd /c` alone can report success from a batch file that ran `exit /b 1`. Preflight still reads the build's output
-  for `FAILED`, but the lowering should start a batch file the careful way itself.
+- **Arguments to a batch file** are each put in double quotes for `cmd /c "call …"`. One holding a `"`, `%`, `^` or
+  `&` reaches the batch file as cmd reads it, not as written.
 - **A `.ps1` run by a path in a variable** has its arguments escaped as a program's would be, since the lowering
   cannot tell it is a script. Preflight runs `deploy.ps1` with no arguments, so it does not matter yet.
 - **`return` inside a block that ends with `finally`,** in a `def`: PowerShell runs the cleanup, Bash and Zsh skip it on

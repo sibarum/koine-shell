@@ -20,9 +20,43 @@ function Test-Succeeds([string]$Program, [object[]]$Arguments = @(), [switch]$Qu
     $ErrorActionPreference = 'Continue'
     $global:LASTEXITCODE = 0
     try {
-        if ($Quiet) { & $Program @Arguments *> $null } else { & $Program @Arguments | Out-Host }
+        if ($Quiet) {
+            Invoke-Program $Program $Arguments *> $null
+        } else {
+            Invoke-Program $Program $Arguments | Out-Host
+        }
     } catch { return $false }
     $LASTEXITCODE -eq 0
+}
+
+# Runs a batch file through cmd /c call, since cmd /c alone can report success from one that ran exit /b 1,
+# and any other program with its arguments as its C runtime reads them. A program named by a value runs here.
+function Invoke-Program([string]$Program, [object[]]$Arguments = @()) {
+    if ($Program -match '\.(cmd|bat)$') {
+        $commandLine = 'call "' + $Program + '"'
+        foreach ($a in $Arguments) { $commandLine += ' "' + [string]$a + '"' }
+        cmd /c $commandLine
+    } else {
+        $native = @(ConvertTo-NativeArgument $Arguments)
+        & $Program @native
+    }
+}
+
+# An argument as a program's C runtime reads it back. Windows PowerShell passes an empty argument as nothing
+# and a " as it is, and quotes an argument with a space only where an even number of " come before it.
+function ConvertTo-NativeArgument([object[]]$Value) {
+    foreach ($v in $Value) {
+        $s = [regex]::Replace([string]$v, '(\\*)"', '$1$1\"')
+        if ($s -eq '') {
+            '""'
+        } elseif ($s -notmatch '\s') {
+            $s
+        } elseif ($s -match '^(?:[^"]*"[^"]*")*[^"]*\s') {
+            [regex]::Replace($s, '(\\+)\z', '$1$1')
+        } else {
+            '"' + [regex]::Replace([regex]::Replace([string]$v, '(\\*)"', '$1$1""'), '(\\+)\z', '$1$1') + '"'
+        }
+    }
 }
 
 # Fails the script: the message in red, with the step it is in, then exit, which runs every finally.

@@ -55,9 +55,11 @@ line of it:
 
 The compiled successor is not a replica. Where it differs:
 
-- **Starting `build.cmd`:** the compiled script runs `& $buildCmd`, not `cmd /c "call …"`. It still reads the output
-  for `FAILED`, but a batch file that ends with `exit /b 1` and prints nothing could pass. The language leaves how a
-  `.cmd` file is started to the compiler, and the compiler does not yet do what this script does.
+- **Starting `build.cmd`** was, until 23 October, the one real loss. The first compiled script ran `& $buildCmd`,
+  and on a batch file whose `exit /b 1` sits inside a block with more after it, that reports **0**: tried on Windows
+  PowerShell 5.1, where `cmd /c "call …"` reports 1. This script's own comment, and `build.cmd`'s, warn of exactly
+  that. Restored: the PowerShell lowering now starts every batch file, and every program named by a value, through an
+  `Invoke-Program` function that runs a batch file as `cmd /c "call …"`.
 - **Messages:** `PREFLIGHT FAILED: the build` becomes `Build failed: …`, with the step's name. The paths in messages
   are written with `/`.
 - **Help:** the three parameters lose their help text. Koine has no way to write it yet (open question 8).

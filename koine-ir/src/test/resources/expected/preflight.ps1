@@ -30,9 +30,26 @@ function Test-Succeeds([string]$Program, [object[]]$Arguments = @(), [switch]$Qu
     $ErrorActionPreference = 'Continue'
     $global:LASTEXITCODE = 0
     try {
-        if ($Quiet) { & $Program @Arguments *> $null } else { & $Program @Arguments | Out-Host }
+        if ($Quiet) {
+            Invoke-Program $Program $Arguments *> $null
+        } else {
+            Invoke-Program $Program $Arguments | Out-Host
+        }
     } catch { return $false }
     $LASTEXITCODE -eq 0
+}
+
+# Runs a batch file through cmd /c call, since cmd /c alone can report success from one that ran exit /b 1,
+# and any other program with its arguments as its C runtime reads them. A program named by a value runs here.
+function Invoke-Program([string]$Program, [object[]]$Arguments = @()) {
+    if ($Program -match '\.(cmd|bat)$') {
+        $commandLine = 'call "' + $Program + '"'
+        foreach ($a in $Arguments) { $commandLine += ' "' + [string]$a + '"' }
+        cmd /c $commandLine
+    } else {
+        $native = @(ConvertTo-NativeArgument $Arguments)
+        & $Program @native
+    }
 }
 
 # An argument as a program's C runtime reads it back. Windows PowerShell passes an empty argument as nothing
@@ -269,7 +286,11 @@ if (-not $skipBuild) {
         # The output is checked for FAILED as well as the exit status, so a failure can never pass as a build.
         $buildCmd = Path_join @($dist, 'build.cmd')
         $failed = $false
-        & $buildCmd | ForEach-Object { $line = $_; Write-Host $line; if ($line.Contains('FAILED')) { $failed = $true } }
+        Invoke-Program $buildCmd | ForEach-Object {
+            $line = $_
+            Write-Host $line
+            if ($line.Contains('FAILED')) { $failed = $true }
+        }
         $status = $LASTEXITCODE
         if ($status -ne 0) { koine_fail "$buildCmd exited with $status" }
         if ($failed) { koine_fail 'The build printed FAILED; see logs/' }
@@ -342,9 +363,7 @@ try {
     $python = Python_find
     if ([string]::IsNullOrEmpty($python)) { koine_fail 'No Python found (python, py, or anaconda3)' }
     $notices = Path_join @($dist, 'notices', 'notices.py')
-    if (-not (Test-Succeeds $python @((ConvertTo-NativeArgument $notices), '--check'))) {
-        koine_fail 'The notices are out of date'
-    }
+    if (-not (Test-Succeeds $python @($notices, '--check'))) { koine_fail 'The notices are out of date' }
 } finally { Script_setStep $outer }
 if ($buildOnly) { Console_success 'Built, started and checked.'; exit 0 }
 try {

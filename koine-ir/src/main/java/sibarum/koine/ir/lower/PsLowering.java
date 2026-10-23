@@ -53,9 +53,14 @@ import static sibarum.koine.ir.ps.Ps.*;
  *   <li>Inside a function, a command's output goes to the host: in PowerShell a function's output is its result.</li>
  *   <li>Arguments to a program are escaped for the C runtime's rules, as Windows PowerShell passes an empty one as
  *       nothing and a {@code "} as it is: a literal here, anything else by a {@code ConvertTo-NativeArgument} function
- *       written into the scripts that use it. PowerShell 7.3 and later are set to pass them as 5.1 does. A
- *       {@code .ps1} script, {@code cmd} and batch files read their arguments their own way and get them as they
- *       are.</li>
+ *       written into the scripts that use it. PowerShell 7.3 and later are set to pass them as 5.1 does. {@code cmd}
+ *       reads its arguments its own way and gets them as they are.</li>
+ *   <li>A batch file, and a program named by a value, which may be one, run through an {@code Invoke-Program}
+ *       function written into the scripts that use it, as {@code Test-Succeeds} does too. It runs a {@code .cmd} or
+ *       {@code .bat} as {@code cmd /c "call "file" "arg" ..."}: without {@code call}, {@code cmd /c} reports success
+ *       from a batch file whose {@code exit /b 1} is inside a block with more after it. Anything else it runs with
+ *       {@code &}, its arguments through ConvertTo-NativeArgument. A {@code .ps1} named by a value is not told apart,
+ *       and gets its arguments escaped as a program would.</li>
  *   <li>A program named like one of Windows PowerShell's aliases, {@code curl}, {@code sort} or {@code where}, is
  *       called with {@code .exe}, as the alias would run a cmdlet instead.</li>
  *   <li>Programs' output is decoded as UTF-8, where Windows PowerShell would use the console's code page.</li>
@@ -85,6 +90,7 @@ public final class PsLowering {
     private boolean inFunction;
     private boolean usesTestSucceeds;
     private boolean usesNativeArgument;
+    private boolean usesInvokeProgram;
     private boolean usesFail;
     private boolean runsPrograms;
     private boolean readsOutput;
@@ -127,6 +133,12 @@ public final class PsLowering {
             body.add(comment("Runs a program: true when it is there and exits 0. Quiet discards its output and errors, and neither"
                     + "\nits complaints on stderr nor its absence stop the script."));
             body.add(testSucceeds());
+        }
+        if (usesInvokeProgram) {
+            body.add(blank());
+            body.add(comment("Runs a batch file through cmd /c call, since cmd /c alone can report success from one that ran exit /b 1,"
+                    + "\nand any other program with its arguments as its C runtime reads them. A program named by a value runs here."));
+            body.add(invokeProgram());
         }
         if (usesNativeArgument) {
             body.add(blank());
@@ -183,7 +195,7 @@ public final class PsLowering {
     }
 
     private static PsStatement testSucceeds() {
-        PsCommand run = call(var("Program"), splat("Arguments"));
+        PsCommand run = cmd("Invoke-Program", var("Program"), var("Arguments"));
         return function("Test-Succeeds", List.of(param("string", "Program"), param("object[]", "Arguments", arr()), param("switch", "Quiet")), block(
                 if_(not(paren(cmd("Get-Command", var("Program"), opt("ErrorAction"), bare("SilentlyContinue")))), block(return_(var("false")))),
                 assign(var("ErrorActionPreference"), sq("Continue")),
@@ -194,6 +206,23 @@ public final class PsLowering {
                         List.of(new PsStatement.Catch(List.of(), block(return_(var("false"))))),
                         Optional.empty()),
                 bin(var("LASTEXITCODE"), BinaryOperator.EQ, num(0))));
+    }
+
+    /**
+     * {@code Invoke-Program}: a {@code .cmd} or {@code .bat} as {@code cmd /c "call "file" "arg" ..."}, each argument in
+     * double quotes, as cmd reads them; anything else with {@code &}, its arguments through ConvertTo-NativeArgument.
+     */
+    private static PsStatement invokeProgram() {
+        PsExpression program = var("Program"), line = var("commandLine"), native_ = var("native");
+        return function("Invoke-Program", List.of(param("string", "Program"), param("object[]", "Arguments", arr())), block(
+                if_(bin(program, BinaryOperator.MATCH, sq("\\.(cmd|bat)$")), block(
+                        assign(line, bin(bin(sq("call \""), BinaryOperator.ADD, program), BinaryOperator.ADD, sq("\""))),
+                        foreach("a", var("Arguments"), block(addAssign(line,
+                                bin(bin(sq(" \""), BinaryOperator.ADD, cast("string", var("a"))), BinaryOperator.ADD, sq("\""))))),
+                        cmd("cmd", bare("/c"), line)))
+                        .orElse(block(
+                                assign(native_, arr(cmd("ConvertTo-NativeArgument", var("Arguments")))),
+                                call(program, splat("native"))))));
     }
 
     /** {@link #nativeArgument(String)} as a PowerShell function, for each of the values it is given. */
@@ -386,13 +415,32 @@ public final class PsLowering {
     /** A program and its arguments: a plain name as a command, anything else after {@code &}. */
     private PsCommand command(Command c) {
         runsPrograms = true;
-        boolean escape = escapesArguments(c.program());
-        List<PsCommandElement> args = c.arguments().stream().map(a -> (PsCommandElement) programArgument(a, escape, true)).toList();
         Expr program = program(c.program());
-        PsCommand command = program instanceof Expr.StringLit s && s.value().matches("[A-Za-z0-9._-]+")
-                ? new PsCommand(PsCommand.Invocation.NONE, bare(s.value()), args, List.of())
-                : new PsCommand(PsCommand.Invocation.CALL, arg(expr(program)), args, List.of());
+        PsCommand command;
+        if (program instanceof Expr.StringLit s && !isBatchFile(s.value())) {
+            boolean escape = escapesArguments(program);
+            List<PsCommandElement> args = c.arguments().stream().map(a -> (PsCommandElement) programArgument(a, escape, true)).toList();
+            command = s.value().matches("[A-Za-z0-9._-]+")
+                    ? new PsCommand(PsCommand.Invocation.NONE, bare(s.value()), args, List.of())
+                    : new PsCommand(PsCommand.Invocation.CALL, arg(expr(program)), args, List.of());
+        } else {
+            // a batch file, or a program named by a value, which may be one: Invoke-Program tells them apart
+            command = invokeProgramCall(program, c.arguments());
+        }
         return c.quiet() ? command.redirect(redirect(PsRedirection.Stream.ALL, var("null"))) : command;
+    }
+
+    /** {@code Invoke-Program program @(arguments)}, the arguments as they are: it escapes them for the program. */
+    private PsCommand invokeProgramCall(Expr program, List<Expr> arguments) {
+        usesInvokeProgram = true;
+        usesNativeArgument = true;
+        List<PsCommandElement> args = new ArrayList<>(List.of(arg(expr(program))));
+        if (!arguments.isEmpty()) args.add(arr(list(arguments.stream().map(this::expr).toArray(PsExpression[]::new))));
+        return cmd("Invoke-Program", args.toArray(PsCommandElement[]::new));
+    }
+
+    private static boolean isBatchFile(String program) {
+        return program.toLowerCase(Locale.ROOT).matches(".*\\.(cmd|bat)");
     }
 
     /** A literal argument as a bare word where PowerShell would pass it through unchanged, else as an expression. */
@@ -413,11 +461,11 @@ public final class PsLowering {
     }
 
     /**
-     * Whether the program reads its command line by the C runtime's rules: not {@code cmd} or a batch file. A
-     * {@code .ps1} named by a value cannot be told apart, so its arguments are escaped as a program's would be.
+     * Whether a program written out reads its command line by the C runtime's rules: not {@code cmd}. A batch file,
+     * and a program named by a value, go through Invoke-Program instead.
      */
     private static boolean escapesArguments(Expr program) {
-        return !(program instanceof Expr.StringLit s && s.value().toLowerCase(Locale.ROOT).matches("cmd|cmd\\.exe|.*\\.(cmd|bat)"));
+        return !(program instanceof Expr.StringLit s && s.value().toLowerCase(Locale.ROOT).matches("cmd|cmd\\.exe"));
     }
 
     /** The program, with {@code .exe} where its name alone would run one of Windows PowerShell's aliases. */
@@ -425,14 +473,16 @@ public final class PsLowering {
         return p instanceof Expr.StringLit s && ALIASES.contains(s.value().toLowerCase(Locale.ROOT)) ? new Expr.StringLit(s.value() + ".exe") : p;
     }
 
+    /** {@code Test-Succeeds program @(arguments)}: its Invoke-Program escapes the arguments, or not, for the program. */
     private PsCommand testSucceedsCall(Command c) {
         usesTestSucceeds = true;
+        usesInvokeProgram = true;
+        usesNativeArgument = true;
         runsPrograms = true;
-        boolean escape = escapesArguments(c.program());
         List<PsCommandElement> args = new ArrayList<>();
         args.add(arg(expr(program(c.program()))));
         if (!c.arguments().isEmpty())
-            args.add(arr(list(c.arguments().stream().map(a -> programArgument(a, escape, false)).toArray(PsExpression[]::new))));
+            args.add(arr(list(c.arguments().stream().map(this::expr).toArray(PsExpression[]::new))));
         if (c.quiet()) args.add(opt("Quiet"));
         return cmd("Test-Succeeds", args.toArray(PsCommandElement[]::new));
     }

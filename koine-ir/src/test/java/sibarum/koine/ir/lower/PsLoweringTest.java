@@ -47,8 +47,9 @@ class PsLoweringTest {
     /**
      * A script of programs called the way Windows PowerShell 5.1 needs lowers to expected/natives.ps1: 7.3's
      * preferences set back to 5.1's, aliases called with .exe, arguments escaped (literals at once, the rest through
-     * ConvertTo-NativeArgument) but not for cmd, $LASTEXITCODE reset before a program named by a value, output read
-     * as UTF-8, and EREs that keep their meaning in .NET.
+     * ConvertTo-NativeArgument) but not for cmd, a batch file and a program named by a value through Invoke-Program,
+     * which runs a batch file with cmd /c call, $LASTEXITCODE reset before them, output read as UTF-8, and EREs that
+     * keep their meaning in .NET.
      */
     @Test
     void nativesLowerAsExpected() throws Exception {
@@ -76,6 +77,7 @@ class PsLoweringTest {
                 new Run(new Command(s("curl"), List.of(s("--version")), false), OnFailure.ABORT),
                 new Run(new Command(s("where"), List.of(s("git")), false), OnFailure.IGNORE),
                 new Run(new Command(s("cmd"), List.of(s("/c"), s("echo \"as it is\"")), false), OnFailure.ABORT),
+                new Run(new Command(s("build.cmd"), List.of(s("all"), ref(quoted)), false), OnFailure.ABORT),
                 new Set(git, s("git")),
                 new Run(new Command(ref(git), List.of(s("a b"), ref(quoted)), false), OnFailure.ABORT),
                 yesNo("status: ", new Succeeds(new Command(s("git"), List.of(s("-C"), ref(dir), s("status")), true))),
