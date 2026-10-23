@@ -1,0 +1,29 @@
+# Says hello, from one source on every OS.
+script Hello<OS>(name = 'world', loud = false)
+  let words = 'a b  c'.words
+  let seen = {}
+  for w in words
+    seen[w] = 'yes'
+  step Greet
+    print {}"hello {name}"
+    if loud
+      Console.warn('LOUD')
+    within Path.parent(Script.directory)
+      let version = `git --version` else 'no git'
+      print {}"git: {version.take(11)}"
+  let tags = []
+  tags.add('x')
+  tags.add('y')
+  if 'b' in words and seen.has('c')
+    print {}"tags {tags.join(',')}, words {words.join('+')}"
+  let missing = `git config --get koine.no-such-key` else 'none'
+  print {}"missing: {missing}"
+  let point = Point(x: 3, label: 'here')
+  print {}"{point.label} at {point.x.text}"
+  if name == 'stop'
+    fail 'asked to stop'
+  return
+
+  record Point
+    x: Number
+    label: String

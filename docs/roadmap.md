@@ -45,8 +45,8 @@ the native code. The first use is deployment and installer scripts; a REPL comes
    - `within` and `step` as members of the standard library. The checker still treats them as keywords, which they
      will stay in how they are written.
 
-   The checker reports problems only. What the compiler will need from it, each name resolved to its declaration and
-   each expression's type, comes with step 3.
+   `Checker.analyse` also keeps what the compiler needs: each expression's type, each declaration's, and what each
+   name, member and call resolved to, in `Checked`.
 3. **Settle the IR.** *Done:* [ir.md](ir.md) gives every construct in preflight its node, and every node its fate.
    `koine-ir` has native functions, records, `Finally`, `Fail`, `In` and captures that say what a failure does, and
    the nodes that are now library members are gone from it and its lowerings. Preflight is built in the IR from the
@@ -56,10 +56,12 @@ the native code. The first use is deployment and installer scripts; a REPL comes
    `Python`. *Written* in `koine-lang/src/main/resources/sibarum/koine/std`, with `Clock`, `Home`, `String`, `Number`
    and `List`. The probe runs the PowerShell and Bash bodies of `String`, `List`, `Path`, `File`, `Number`, `Json`
    (PowerShell only) and `Console.warn`; the rest run first in step 5. The installer will add `Nanobuf`.
-5. **Compile preflight.** The compiler takes the checked tree to the IR: resolving `on` and `native` for the OS,
-   emitting the library members a script uses, expanding members that take a block, and reading data into records.
-   Its output for preflight should be what `Preflight.java` in `koine-ir`'s tests builds by hand. Preflight is for
-   Windows only, so it compiles to PowerShell; then run it for real, and compare it with the original `preflight.ps1`.
+5. **Compile preflight.** *Compiled:* `koine-compiler` takes the checked tree to the IR for one OS: it picks `on`
+   and `native` for the OS, emits the library members a script uses in the order it first uses them, expands members
+   that take a block, `within` and `step` among them, and reads data into records. `preflight.koine` compiles to
+   exactly the IR `Preflight.java` in `koine-ir`'s tests builds by hand. A smaller script, `hello.koine` in its tests,
+   compiled for Windows and for Linux, runs and prints the same on PowerShell and Bash. *Still to do:* run the
+   compiled `preflight.ps1` for real, and compare it with the original.
 6. **Port a real installer as a bootstrap script.** This is the milestone.
 
 ## After that

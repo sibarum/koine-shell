@@ -192,6 +192,26 @@ class ParserTest {
     }
 
     @Test
+    void aCommentDirectlyAboveAStatementIsKept() {
+        assertEquals("""
+                (# What it does.)
+                (script S <OS>)
+                  (# kept / over two lines)
+                  (print 'a')
+                  (print 'b')
+                """, SyntaxPrinter.print(Parser.parse("s.koine", """
+                # What it does.
+                script S<OS>
+                  # kept
+                  # over two lines
+                  print 'a'
+                  # a blank line after it: dropped
+
+                  print 'b' # and one after a statement too
+                """)));
+    }
+
+    @Test
     void theScriptLineNamesItsOSes() {
         assertEquals("(script S <Windows> (x = 1))\n  (return)\n",
                 SyntaxPrinter.print(Parser.parse("s.koine", "script S<Windows>(x = 1)\n  return\n")));

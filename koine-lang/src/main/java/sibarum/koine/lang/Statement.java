@@ -84,6 +84,10 @@ public sealed interface Statement {
         }
     }
 
+    /** Whole-line comments directly above the statement after it, one line of text each, carried into the output. */
+    record Comment(String text, Pos pos) implements Statement {
+    }
+
     /** Cleanup that ends a block, and runs however the block ends. */
     record Finally(List<Statement> body, Pos pos) implements Statement {
         public Finally {

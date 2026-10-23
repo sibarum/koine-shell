@@ -66,8 +66,8 @@ final class Preflight {
     static final Var LATEST = new Var("latest", STRING);
     static final Var DEPLOY = new Var("deploy", STRING);
     static final Var SITE = new Var("site", STRING);
-    /** The step each {@code step} was in before it, put back afterwards: the renamed local of Script.runStep. */
-    static final Var OUTER = new Var("outerStep", STRING);
+    /** The step each {@code step} was in before it, put back afterwards: Script.runStep's own variable. */
+    static final Var OUTER = new Var("outer", STRING);
 
     static final Var STAMP = new Var("stamp", STRING);
     static final Var BUILT_FROM = new Var("builtFrom", mapOf(STRING));
@@ -81,17 +81,18 @@ final class Preflight {
 
     // ---- functions ----------------------------------------------------------------------------------------------
 
-    /** Every native member preflight uses, directly or through Python.find and the expanded steps. */
+    /**
+     * Every native member preflight uses, directly or through Python.find and the expanded steps, in the order the
+     * compiler meets them: the order they are first used in, reading the script from the top.
+     */
     static final List<String[]> NATIVES = List.of(
-            m("Script", "directory"), m("Script", "sibling"), m("Script", "currentStep"), m("Script", "setStep"),
-            m("Path", "join"), m("Path", "parent"), m("Path", "name"), m("Path", "full"),
-            m("Dir", "create"), m("Dir", "push"), m("Dir", "pop"),
-            m("File", "exists"), m("File", "lines"), m("Json", "read"),
-            m("Process", "start"), m("Process", "running"), m("Process", "stop"), m("Clock", "sleep"),
-            m("Console", "heading"), m("Console", "success"), m("Console", "warn"), m("Console", "error"),
-            m("Console", "interactive"), m("Console", "pause"),
-            m("Home", "directory"), m("String", "empty"), m("String", "endsWith"), m("String", "take"),
-            m("String", "words"), m("Number", "text"), m("List", "join"));
+            m("Script", "directory"), m("Path", "parent"), m("Path", "join"), m("Dir", "create"), m("Json", "read"),
+            m("Path", "full"), m("Console", "heading"), m("Script", "currentStep"), m("Script", "setStep"),
+            m("String", "endsWith"), m("File", "exists"), m("Dir", "push"), m("Process", "start"), m("Clock", "sleep"),
+            m("Process", "running"), m("Process", "stop"), m("Number", "text"), m("Dir", "pop"), m("Console", "error"),
+            m("File", "lines"), m("String", "words"), m("String", "take"), m("Path", "name"), m("Console", "warn"),
+            m("Console", "interactive"), m("Console", "pause"), m("List", "join"), m("Home", "directory"),
+            m("String", "empty"), m("Console", "success"), m("Script", "sibling"));
 
     static final FunctionSig PYTHON_FIND = new FunctionSig("Python_find", List.of(), Optional.of(STRING));
     static final FunctionSig LINUX_BUILD_PROBLEMS = new FunctionSig("linuxBuildProblems", List.of(LOGS, ROOT, CONFIGS),
@@ -115,8 +116,8 @@ final class Preflight {
                         new Append(CONFIGS, call("Path", "full", path(ref(DIST), field(ref(MEMBER_), "config"))))),
                 when(new Not(ref(SKIP_BUILD)), step("Build", build())),
                 step("Start", start()),
-                new Comment("The Linux binaries are built in the Linux VM by build.sh, which writes logs/linux/BUILD.txt: the commit of\n"
-                        + "every checkout it built. They are fit to publish only while every one of those is still checked out."),
+                new Comment("The Linux binaries are built in the Linux VM by build.sh, which writes logs/linux/BUILD.txt: the commit of every\n"
+                        + "checkout it built. They are fit to publish only while every one of those is still checked out."),
                 step("Linux", linux()),
                 step("Notices", body(
                         set(PYTHON, new Call(PYTHON_FIND, List.of())),
@@ -138,12 +139,13 @@ final class Preflight {
         return new Script("preflight",
                 "Everything before publishing: builds the stack, starts every application, checks the notices and "
                         + "versions, and generates the installers without publishing them.",
-                "Nothing is uploaded, committed or pushed. Stops at the first failing step. It builds and starts the "
-                        + "Windows applications, so it is for Windows only.",
+                "Nothing is uploaded, committed or pushed. Stops at the first failing step. It builds and starts the Windows\n"
+                        + "applications, so it is for Windows only.",
+                // the inputs have no help yet: language.md, open question 8
                 List.of(
-                        new Script.Param(SKIP_BUILD, Optional.empty(), "Use the exes already in each application's target directory."),
-                        new Script.Param(SECONDS, Optional.of(i(8)), "How long each application must stay up."),
-                        new Script.Param(BUILD_ONLY, Optional.empty(), "Stop after the notices, generating nothing.")),
+                        new Script.Param(SKIP_BUILD, Optional.empty(), ""),
+                        new Script.Param(SECONDS, Optional.of(i(8)), ""),
+                        new Script.Param(BUILD_ONLY, Optional.empty(), "")),
                 body);
     }
 
@@ -269,11 +271,12 @@ final class Preflight {
 
     /** {@code step Name}: Script.runStep, expanded. */
     private static List<Statement> step(String name, List<Statement> block) {
-        return body(
+        // its finally ends its whole body, so all of it is the Finally's
+        return body(new Finally(body(
                 invoke("Console", "heading", s(name)),
                 set(OUTER, call("Script", "currentStep")),
                 invoke("Script", "setStep", s(name)),
-                new Finally(block, body(invoke("Script", "setStep", ref(OUTER)))));
+                block), body(invoke("Script", "setStep", ref(OUTER)))));
     }
 
     /** {@code within dir}: Dir.runIn, expanded. */

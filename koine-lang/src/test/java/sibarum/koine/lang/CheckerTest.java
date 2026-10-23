@@ -48,19 +48,19 @@ class CheckerTest {
     @Test
     void aMistakeInPreflightIsCaught() {
         String preflight = resource("examples/preflight.koine");
-        assertEquals(List.of("preflight.koine:58:9: no name linuxApp"),
+        assertEquals(List.of("preflight.koine:60:9: no name linuxApp"),
                 problems("preflight.koine", preflight.replace("linuxApps.add(app.name)", "linuxApp.add(app.name)")));
-        assertEquals(List.of("preflight.koine:39:48: Process.start takes String for log, not Number"),
+        assertEquals(List.of("preflight.koine:41:48: Process.start takes String for log, not Number"),
                 problems("preflight.koine", preflight.replace("Process.start(exe, log)", "Process.start(exe, seconds)")));
-        assertEquals(List.of("preflight.koine:45:58: only a String can be inserted into a string, not Number; convert "
+        assertEquals(List.of("preflight.koine:47:58: only a String can be inserted into a string, not Number; convert "
                         + "it with .text"),
                 problems("preflight.koine", preflight.replace("{seconds.text}s", "{seconds}s")));
         // Every Json.read, including the one in linuxBuildProblems, which is checked at its first call.
         List<String> bootstrap = problems("preflight.koine",
                 preflight.replace("script Preflight<Windows>", "bootstrap script Preflight<OS>"));
-        assertEquals(List.of("11:20", "30:22", "56:22", "134:22", "88:22", "92:24"),
+        assertEquals(List.of("13:20", "32:22", "58:22", "136:22", "90:22", "94:24"),
                 bootstrap.stream().map(p -> p.split(":")[1] + ":" + p.split(":")[2]).toList());
-        assertEquals("preflight.koine:11:20: Json.read is bundled on Linux, Mac, and a bootstrap script may use only "
+        assertEquals("preflight.koine:13:20: Json.read is bundled on Linux, Mac, and a bootstrap script may use only "
                 + "native members", bootstrap.getFirst());
     }
 

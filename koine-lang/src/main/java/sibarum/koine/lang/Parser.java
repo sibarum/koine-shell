@@ -2,6 +2,7 @@ package sibarum.koine.lang;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import sibarum.koine.lang.Token.Code;
@@ -16,11 +17,14 @@ public final class Parser {
 
     private final String source;
     private final List<Token> tokens;
+    /** Comments by the line they are above; see {@link Lexer}. */
+    private final Map<Integer, String> comments;
     private int k;
 
-    private Parser(String source, List<Token> tokens) {
+    private Parser(String source, List<Token> tokens, Map<Integer, String> comments) {
         this.source = source;
         this.tokens = tokens;
+        this.comments = comments;
     }
 
     /**
@@ -30,7 +34,8 @@ public final class Parser {
      * @param text   what it holds
      */
     public static SourceFile parse(String source, String text) {
-        Parser p = new Parser(source, Lexer.lex(source, text));
+        Lexer.Lexed lexed = Lexer.lexAll(source, text);
+        Parser p = new Parser(source, lexed.tokens(), lexed.comments());
         SourceFile file = p.file();
         p.expect(Kind.EOF, "the end of the file");
         return file;
@@ -44,6 +49,7 @@ public final class Parser {
 
     private SourceFile.Script script() {
         Pos at = peek().pos();
+        String doc = comments.getOrDefault(at.line(), "");
         boolean bootstrap = accept(Kind.BOOTSTRAP);
         expect(Kind.SCRIPT, bootstrap ? "script after bootstrap" : "script");
         String name = name("the script's name");
@@ -52,7 +58,7 @@ public final class Parser {
         expect(Kind.GT, ">");
         List<Statement.Param> inputs = at(Kind.LPAREN) ? parameters() : List.of();
         endOfLine();
-        return new SourceFile.Script(name, systems, bootstrap, inputs, block(false), at);
+        return new SourceFile.Script(name, systems, bootstrap, doc, inputs, block(false), at);
     }
 
     private SourceFile.Module module() {
@@ -62,6 +68,7 @@ public final class Parser {
         endOfLine();
         List<Statement> members = new ArrayList<>();
         while (!at(Kind.EOF)) {
+            comment().ifPresent(members::add);
             Statement s = statement(false);
             if (!(s instanceof Statement.Def) && !(s instanceof Statement.Record))
                 throw new KoineException(source, s.pos(), "a module holds only def and record");
@@ -79,14 +86,23 @@ public final class Parser {
     private List<Statement> block(boolean branchesAllowed) {
         expect(Kind.INDENT, "an indented block");
         List<Statement> body = new ArrayList<>();
+        Statement.Finally last = null;
         while (!at(Kind.DEDENT) && !at(Kind.EOF)) {
+            if (last != null) throw new KoineException(source, last.pos(), "finally is the last thing in its block");
+            comment().ifPresent(body::add);
             Statement s = statement(branchesAllowed);
-            if (!body.isEmpty() && body.getLast() instanceof Statement.Finally f)
-                throw new KoineException(source, f.pos(), "finally is the last thing in its block");
+            if (s instanceof Statement.Finally f) last = f;
             body.add(s);
         }
         expect(Kind.DEDENT, "the end of the block");
         return body;
+    }
+
+    /** The comment above the next statement, if one was kept. */
+    private Optional<Statement> comment() {
+        Pos at = peek().pos();
+        String text = comments.get(at.line());
+        return text == null ? Optional.empty() : Optional.of(new Statement.Comment(text, at));
     }
 
     private Statement statement(boolean branchesAllowed) {
@@ -490,7 +506,7 @@ public final class Parser {
 
     /** The expression between a string's or a command's brackets. */
     private Expr inserted(Code code) {
-        Parser p = new Parser(source, code.tokens());
+        Parser p = new Parser(source, code.tokens(), Map.of());
         if (p.at(Kind.EOF)) throw new KoineException(source, code.pos(), "the brackets hold no value");
         Expr e = p.expr();
         if (!p.at(Kind.EOF)) throw p.error(p.peek(), "expected the closing bracket, found " + p.peek().describe());

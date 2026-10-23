@@ -5,6 +5,7 @@ import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -21,7 +22,8 @@ import sibarum.koine.lang.Type.Prim;
  */
 public final class Checker {
 
-    enum OS {Windows, Linux, Mac}
+    /** The OSes a script is compiled for. */
+    public enum OS {Windows, Linux, Mac}
 
     private static final Set<OS> ALL = EnumSet.allOf(OS.class);
 
@@ -31,6 +33,11 @@ public final class Checker {
     private final Map<String, Unit> modules = new HashMap<>();
     /** For each member that takes a block, the members that take one it calls. */
     private final Map<Member, Set<Member>> blockCalls = new LinkedHashMap<>();
+    /** What the compiler reads: each expression's type, each declaration's, and what each name and call is. */
+    private final Map<Expr, Type> types = new IdentityHashMap<>();
+    private final Map<Object, Type> declared = new IdentityHashMap<>();
+    private final Map<Expr, Resolution> resolutions = new IdentityHashMap<>();
+    private Unit scriptUnit;
 
     private Checker(Library library) {
         this.library = library;
@@ -48,6 +55,11 @@ public final class Checker {
     }
 
     public static List<Problem> check(String source, SourceFile file, Library library) {
+        return analyse(source, file, library).problems();
+    }
+
+    /** Checks one file, and keeps what the compiler needs from the checking. */
+    public static Checked analyse(String source, SourceFile file, Library library) {
         Checker c = new Checker(library);
         switch (file) {
             case SourceFile.Script s -> c.script(source, s);
@@ -58,13 +70,40 @@ public final class Checker {
             }
         }
         c.blockCycles();
-        return List.copyOf(c.problems);
+        return new Checked(c);
+    }
+
+    // ---- what Checked reads ------------------------------------------------------------------------------------
+
+    List<Problem> problems() {
+        return List.copyOf(problems);
+    }
+
+    Unit scriptUnit() {
+        return scriptUnit;
+    }
+
+    Map<Expr, Type> types() {
+        return types;
+    }
+
+    Map<Object, Type> declared() {
+        return declared;
+    }
+
+    Map<Expr, Resolution> resolutions() {
+        return resolutions;
+    }
+
+    /** A module by name, loaded and checked if it was not yet; null if there is none. */
+    Unit load(String name) {
+        return module(name, scriptUnit, null, true);
     }
 
     // ---- files --------------------------------------------------------------------------------------------------
 
     /** A script or a module: its own functions and records, and the OSes it is compiled for. */
-    private static final class Unit {
+    public static final class Unit {
         final String source;
         /** Null for a script. */
         final String module;
@@ -81,10 +120,27 @@ public final class Checker {
             this.bootstrap = bootstrap;
             this.bundled = bundled;
         }
+
+        /** The module's name; null for a script. */
+        public String module() {
+            return module;
+        }
+
+        public Set<OS> targets() {
+            return targets;
+        }
+
+        public Map<String, Member> members() {
+            return java.util.Collections.unmodifiableMap(members);
+        }
+
+        public Map<String, Type.Rec> records() {
+            return java.util.Collections.unmodifiableMap(records);
+        }
     }
 
     /** A {@code def}, in a script or a module. */
-    private static final class Member {
+    public static final class Member {
         final Unit unit;
         final Statement.Def def;
         final List<Type> params = new ArrayList<>();
@@ -102,21 +158,41 @@ public final class Checker {
             this.def = def;
         }
 
-        String display() {
+        public Unit unit() {
+            return unit;
+        }
+
+        public Statement.Def def() {
+            return def;
+        }
+
+        /** The parameters' types; a repeated one's is its items'. */
+        public List<Type> params() {
+            return java.util.Collections.unmodifiableList(params);
+        }
+
+        /** {@link Prim#NOTHING} for none. */
+        public Type result() {
+            return Type.prune(result);
+        }
+
+        /** {@code Path.join}, or a script's own {@code linuxBuildProblems}. */
+        public String display() {
             return unit.module == null ? def.name() : unit.module + "." + def.name();
         }
 
-        boolean takesBlock() {
+        public boolean takesBlock() {
             return !params.isEmpty() && Type.prune(params.getLast()) == Prim.BLOCK;
         }
 
-        boolean repeated() {
+        public boolean repeated() {
             return !def.parameters().isEmpty() && def.parameters().getLast().repeated();
         }
     }
 
     private void script(String source, SourceFile.Script s) {
         Unit u = new Unit(source, null, targets(source, s), s.bootstrap(), false);
+        scriptUnit = u;
         List<Statement> story = new ArrayList<>();
         List<Statement.Record> records = new ArrayList<>();
         List<Statement.Def> defs = new ArrayList<>();
@@ -145,7 +221,7 @@ public final class Checker {
                 problem(u, p.pos(), p.name() + " needs a type or a default");
                 t = Prim.ERROR;
             }
-            declare(c, p.name(), t, p.pos());
+            declare(c, p, p.name(), t, p.pos());
         }
         statements(story, c);
 
@@ -284,7 +360,7 @@ public final class Checker {
         List<Statement.Param> ps = m.def.parameters();
         for (int i = 0; i < ps.size(); i++) {
             Type t = m.params.get(i);
-            declare(c, ps.get(i).name(), ps.get(i).repeated() ? new Type.ListOf(t) : t, ps.get(i).pos());
+            declare(c, ps.get(i), ps.get(i).name(), ps.get(i).repeated() ? new Type.ListOf(t) : t, ps.get(i).pos());
         }
 
         List<Statement> body = m.def.body();
@@ -299,6 +375,8 @@ public final class Checker {
                         statements(on.body(), c.on(compiled));
                     }
                     case Statement.Native n -> cover(m, covered, n.systems(), n.pos());
+                    case Statement.Comment n -> {
+                    }
                     default -> problem(u, s.pos(), "a def's body is either Koine, or branches by OS with on and native, "
                             + "not both");
                 }
@@ -415,7 +493,7 @@ public final class Checker {
     private void statement(Statement statement, Ctx c) {
         Unit u = c.unit();
         switch (statement) {
-            case Statement.Let s -> declare(c, s.name(), value(s.value(), c), s.pos());
+            case Statement.Let s -> declare(c, s, s.name(), value(s.value(), c), s.pos());
             case Statement.Assign s -> assign(s, c);
             case Statement.If s -> {
                 for (Statement.If.Branch b : s.branches()) {
@@ -446,7 +524,7 @@ public final class Checker {
                     };
                 }
                 Ctx body = c.child();
-                declare(body, s.item(), item, s.pos());
+                declare(body, s, s.item(), item, s.pos());
                 statements(s.body(), body);
             }
             case Statement.While s -> {
@@ -464,6 +542,8 @@ public final class Checker {
             case Statement.Print s -> message(s.message(), "print", c);
             case Statement.Run s -> run(s, c);
             case Statement.Finally s -> statements(s.body(), c.given());
+            case Statement.Comment s -> {
+            }
             case Statement.Def s -> problem(u, s.pos(), "def goes at the top level of a script or a module");
             case Statement.Record s -> problem(u, s.pos(), "record goes at the top level of a script or a module");
             // Reported where the def's body is checked: on and native are only ever a def's whole body.
@@ -474,7 +554,9 @@ public final class Checker {
         }
     }
 
-    private void declare(Ctx c, String name, Type type, Pos pos) {
+    /** Introduces a name; {@code node}, the let, for or parameter that does, keeps its type for the compiler. */
+    private void declare(Ctx c, Object node, String name, Type type, Pos pos) {
+        declared.put(node, type);
         if (c.scope().find(name) != null) problem(c.unit(), pos, name + " is already defined; reassign it with " + name
                 + " = …");
         c.scope().names.put(name, type);
@@ -561,6 +643,7 @@ public final class Checker {
             return;
         } else if (e instanceof Expr.Name || e instanceof Expr.Member || e instanceof Expr.Call) {
             Type t = reference(e, c, block);
+            types.put(e, t);
             if (Type.prune(t) == Prim.DATA) problem(u, e.pos(), "read data into a record with as: … as Record");
             return;
         } else {
@@ -589,6 +672,12 @@ public final class Checker {
     }
 
     private Type eval(Expr expr, Ctx c) {
+        Type t = typeOf(expr, c);
+        types.put(expr, t);
+        return t;
+    }
+
+    private Type typeOf(Expr expr, Ctx c) {
         Unit u = c.unit();
         return switch (expr) {
             case Expr.Name e -> reference(e, c, null);
@@ -724,9 +813,15 @@ public final class Checker {
         switch (e) {
             case Expr.Name n -> {
                 Type v = c.scope().find(n.name());
-                if (v != null) return v;
+                if (v != null) {
+                    resolutions.put(n, new Resolution.Local(n.name()));
+                    return v;
+                }
                 Member m = u.members.get(n.name());
-                if (m != null) return call(m, null, List.of(), n.pos(), c, block);
+                if (m != null) {
+                    resolutions.put(n, new Resolution.Call(m, false));
+                    return call(m, null, List.of(), n.pos(), c, block);
+                }
                 if (record(n.name(), u, n.pos()) != null)
                     problem(u, n.pos(), n.name() + " is a record; make one with " + n.name() + "(field: …)");
                 else if (capitalised(n.name()) && module(n.name(), u, n.pos(), true) != null)
@@ -735,7 +830,7 @@ public final class Checker {
                 return Prim.ERROR;
             }
             case Expr.Member mm -> {
-                return member(mm, List.of(), c, block);
+                return member(mm, mm, List.of(), c, block);
             }
             case Expr.Call call -> {
                 switch (call.callee()) {
@@ -745,10 +840,14 @@ public final class Checker {
                             return Prim.ERROR;
                         }
                         Member m = u.members.get(n.name());
-                        if (m != null) return call(m, null, call.arguments(), n.pos(), c, block);
+                        if (m != null) {
+                            resolutions.put(call, new Resolution.Call(m, false));
+                            return call(m, null, call.arguments(), n.pos(), c, block);
+                        }
                         Type.Rec r = record(n.name(), u, n.pos());
                         if (r != null) {
                             if (block != null) problem(u, n.pos(), "a record is not given a block");
+                            resolutions.put(call, new Resolution.Construct(r));
                             return construct(r, call, c);
                         }
                         problem(u, n.pos(), "no function " + n.name());
@@ -756,7 +855,7 @@ public final class Checker {
                         return Prim.ERROR;
                     }
                     case Expr.Member mm -> {
-                        return member(mm, call.arguments(), c, block);
+                        return member(call, mm, call.arguments(), c, block);
                     }
                     default -> {
                         problem(u, call.pos(), "only a function or a member can be called");
@@ -769,8 +868,11 @@ public final class Checker {
         }
     }
 
-    /** {@code target.name}, called with {@code arguments} when they are written. */
-    private Type member(Expr.Member mm, List<Expr.Argument> arguments, Ctx c, List<Statement> block) {
+    /**
+     * {@code target.name}, called with {@code arguments} when they are written. {@code site} is the expression as
+     * written, the member or the call of it, which what it resolves to is kept for.
+     */
+    private Type member(Expr site, Expr.Member mm, List<Expr.Argument> arguments, Ctx c, List<Statement> block) {
         Unit u = c.unit();
         if (mm.target() instanceof Expr.Name n && c.scope().find(n.name()) == null && !u.members.containsKey(n.name())
                 && capitalised(n.name())) {
@@ -785,19 +887,21 @@ public final class Checker {
                 arguments(arguments, c);
                 return Prim.ERROR;
             }
+            resolutions.put(site, new Resolution.Call(m, false));
             return call(m, null, arguments, mm.pos(), c, block);
         }
 
         Type t = Type.prune(value(mm.target(), c));
         if (t instanceof Type.Rec r && r.fields.containsKey(mm.name())) {
             if (!arguments.isEmpty() || block != null) problem(u, mm.pos(), r.name + "." + mm.name() + " is a field");
+            resolutions.put(site, new Resolution.Field(mm.name()));
             return r.fields.get(mm.name()).type();
         }
-        return method(t, mm, arguments, c, block);
+        return method(site, t, mm, arguments, c, block);
     }
 
     /** A member looked up by the type of the value before the dot, which becomes its first argument. */
-    private Type method(Type t, Expr.Member mm, List<Expr.Argument> arguments, Ctx c, List<Statement> block) {
+    private Type method(Expr site, Type t, Expr.Member mm, List<Expr.Argument> arguments, Ctx c, List<Statement> block) {
         Unit u = c.unit();
         String name = mm.name();
         if (t == Prim.ERROR) {
@@ -813,6 +917,7 @@ public final class Checker {
         // Built into the compiler: they work on any list, map or record, add changes its list in place, and matches
         // needs its pattern when compiling.
         boolean container = t == Prim.STRING || t instanceof Type.ListOf || t instanceof Type.MapOf || t instanceof Type.Rec;
+        resolutions.put(site, new Resolution.Builtin(name));
         if (name.equals("isEmpty") && container && arguments.isEmpty()) return Prim.BOOL;
         if (t instanceof Type.MapOf m && name.equals("keys") && arguments.isEmpty()) return new Type.ListOf(m.key());
         if (t instanceof Type.MapOf m && name.equals("has") && arguments.size() == 1) {
@@ -849,6 +954,7 @@ public final class Checker {
             arguments(arguments, c);
             return Prim.ERROR;
         }
+        resolutions.put(site, new Resolution.Call(m, true));
         return call(m, t, arguments, mm.pos(), c, block);
     }
 

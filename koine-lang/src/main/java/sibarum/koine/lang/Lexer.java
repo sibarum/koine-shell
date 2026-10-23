@@ -3,7 +3,9 @@ package sibarum.koine.lang;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import sibarum.koine.lang.Token.Code;
 import sibarum.koine.lang.Token.Kind;
@@ -18,6 +20,9 @@ import sibarum.koine.lang.Token.Text;
  * Strings and literal commands are lexed whole, with the expressions in their brackets lexed on the spot, so a
  * string inside an insert inside a string needs no escaping. The lines under a {@code native} line are not lexed at
  * all: they become one {@link Kind#RAW} token.
+ * <p>
+ * A comment is not a token. A run of whole-line comments directly above a line, with no blank line between, is kept
+ * with that line's number, for the parser to make a statement of.
  */
 final class Lexer {
 
@@ -28,10 +33,23 @@ final class Lexer {
     private int i;
     private int line = 1;
     private int lineStart;
+    /** The comments kept, by the line they are above, and the run of comment lines not yet above anything. */
+    private final Map<Integer, String> comments = new HashMap<>();
+    private final List<String> pending = new ArrayList<>();
 
     private Lexer(String source, String text) {
         this.source = source;
         this.text = text.replace("\r\n", "\n").replace('\r', '\n');
+    }
+
+    /** The tokens, and the comments above lines, by line. */
+    record Lexed(List<Token> tokens, Map<Integer, String> comments) {
+    }
+
+    static Lexed lexAll(String source, String text) {
+        Lexer l = new Lexer(source, text);
+        List<Token> tokens = l.run();
+        return new Lexed(tokens, Map.copyOf(l.comments));
     }
 
     static List<Token> lex(String source, String text) {
@@ -50,12 +68,21 @@ final class Lexer {
             char c = text.charAt(i);
             if (c == '\t') throw error(pos(), "indent with spaces, not tabs");
             if (c == '\n') {
+                pending.clear();
                 newline();
                 continue;
             }
             if (c == '#') {
+                int start = i + 1;
                 skipToEndOfLine();
+                String comment = text.substring(start, i).stripTrailing();
+                pending.add(comment.startsWith(" ") ? comment.substring(1) : comment);
+                if (i < text.length()) newline();
                 continue;
+            }
+            if (!pending.isEmpty()) {
+                comments.put(line, String.join("\n", pending));
+                pending.clear();
             }
             Pos at = pos();
             if (indent > indents.peek()) {

@@ -63,6 +63,19 @@ There are no macros. A macro pastes shell text into its caller, and then has to 
 values are quoted in and out, and what becomes of Bash's `local` and PowerShell's stray output. Rules 1–5 under
 [Functions](#functions) answer those questions for a `def`, so a `def` with per-OS bodies is the escape hatch.
 
+## Comments
+
+`#` starts a comment, to the end of the line. Whole-line comments directly above a line, with no blank line between,
+belong to it:
+
+- **Above the script line, they are the script's help:** the first paragraph its synopsis, the rest its description,
+  which `--help` and PowerShell's `Get-Help` show. A line that is only `#` separates paragraphs.
+- **Above a statement, they are carried into every output,** so the compiled script explains itself as the source
+  does.
+- **Above a `def` or a record, they describe it** in the source; they are not carried.
+
+A comment after a blank line, or after code on the same line, is the source's alone.
+
 ## Keywords
 
 | Keyword | Role |
@@ -584,8 +597,10 @@ rewritten in this language:
 
 ```
 # Everything before publishing: builds the stack, starts every application, checks the notices and versions, and
-# generates the installers without publishing them. Nothing is uploaded, committed or pushed. Stops at the first
-# failing step. It builds and starts the Windows applications, so it is for Windows only.
+# generates the installers without publishing them.
+#
+# Nothing is uploaded, committed or pushed. Stops at the first failing step. It builds and starts the Windows
+# applications, so it is for Windows only.
 script Preflight<Windows>(skipBuild = false, seconds = 8, buildOnly = false)
   let dist = Script.directory
   let root = Path.parent(dist)
@@ -799,8 +814,9 @@ script Preflight<Windows>(skipBuild = false, seconds = 8, buildOnly = false)
 7. **Which OSes a script supports: settled.** The script line names them, `<OS>` for all three, and `bootstrap script`
    marks an installer. The standard library covers every OS, and anything per OS is a `def` of the script's own with
    `on` and `native` bodies; there are no macros. See [Scripts and targets](#scripts-and-targets).
-8. **Help text for script inputs.** The original documents each parameter. Comments could carry it, or `script` could
-   take descriptions.
+8. **Help text for script inputs.** The comment above the script line is its help now (see [Comments](#comments)),
+   but the inputs have none: the original documents each one. A comment beside each input, or descriptions in the
+   script line, could carry it.
 9. **Members and actions look alike.** `process.running` reads a value and `process.stop` does something, and without
    parentheses they look the same. Shell scripts are mostly actions.
 10. **Delimiters for ordinary strings: settled.** Strings and commands are plain unless a prefix defines value

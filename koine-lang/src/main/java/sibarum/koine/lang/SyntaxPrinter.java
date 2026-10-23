@@ -18,6 +18,7 @@ public final class SyntaxPrinter {
         SyntaxPrinter p = new SyntaxPrinter();
         switch (file) {
             case SourceFile.Script s -> {
+                if (!s.doc().isEmpty()) p.line(0, comment(s.doc()));
                 p.line(0, "(" + (s.bootstrap() ? "bootstrap " : "") + "script " + s.name()
                         + " <" + String.join(" ", s.systems()) + ">" + params(s.inputs()) + ")");
                 p.block(1, s.body());
@@ -88,6 +89,7 @@ public final class SyntaxPrinter {
                 line(depth, "(run " + expr(s.expr()) + ")");
                 block(depth + 1, s.block());
             }
+            case Statement.Comment s -> line(depth, comment(s.text()));
             case Statement.Finally s -> {
                 line(depth, "(finally)");
                 block(depth + 1, s.body());
@@ -107,6 +109,11 @@ public final class SyntaxPrinter {
                     line(depth + 1, "(" + f.name() + " " + type(f.type()) + (f.optional() ? "?" : "") + ")");
             }
         }
+    }
+
+    /** {@code (# first line / second line)}. */
+    private static String comment(String text) {
+        return "(# " + text.replace("\n", " / ") + ")";
     }
 
     private static String params(List<Statement.Param> params) {

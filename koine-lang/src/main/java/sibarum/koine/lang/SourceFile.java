@@ -12,8 +12,9 @@ public sealed interface SourceFile {
     /**
      * {@code script Name<OS>(inputs)} and its body. {@code systems} are the names between the angle brackets as
      * written: {@code OS} for all three, or the OSes the script is for. A {@code bootstrap} script is an installer.
+     * {@code doc} is the comment directly above the script line, or empty.
      */
-    record Script(String name, List<String> systems, boolean bootstrap, List<Statement.Param> inputs,
+    record Script(String name, List<String> systems, boolean bootstrap, String doc, List<Statement.Param> inputs,
                   List<Statement> body, Pos pos) implements SourceFile {
         public Script {
             systems = List.copyOf(systems);

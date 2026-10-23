@@ -36,4 +36,21 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
+
+    <!-- The hand-built preflight in the tests is what koine-compiler's tests compare its output with. -->
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>test-jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>

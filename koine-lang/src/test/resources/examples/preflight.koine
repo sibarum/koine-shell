@@ -1,6 +1,8 @@
 # Everything before publishing: builds the stack, starts every application, checks the notices and versions, and
-# generates the installers without publishing them. Nothing is uploaded, committed or pushed. Stops at the first
-# failing step. It builds and starts the Windows applications, so it is for Windows only.
+# generates the installers without publishing them.
+#
+# Nothing is uploaded, committed or pushed. Stops at the first failing step. It builds and starts the Windows
+# applications, so it is for Windows only.
 script Preflight<Windows>(skipBuild = false, seconds = 8, buildOnly = false)
   let dist = Script.directory
   let root = Path.parent(dist)

@@ -5,9 +5,10 @@ import java.util.Map;
 
 /**
  * A type, as the checker knows it. An empty list, an empty map, and a parameter or result a script's {@code def} leaves
- * out start as a {@link Var}, which the first use that says more {@link #unify unifies} with a known type.
+ * out start as a {@link Var}, which the first use that says more {@link #unify unifies} with a known type. The compiler
+ * reads them through {@link Checked}.
  */
-sealed interface Type {
+public sealed interface Type {
 
     enum Prim implements Type {
         STRING("String"), NUMBER("Number"), BOOL("Bool"),
@@ -24,6 +25,10 @@ sealed interface Type {
 
         Prim(String name) {
             this.name = name;
+        }
+
+        public String displayName() {
+            return name;
         }
     }
 
@@ -44,6 +49,20 @@ sealed interface Type {
             this.name = name;
             this.module = module;
         }
+
+        public String name() {
+            return name;
+        }
+
+        /** The module that declares it, or null for a script's own record. */
+        public String module() {
+            return module;
+        }
+
+        /** Its fields, in the order they are declared. */
+        public Map<String, Field> fields() {
+            return java.util.Collections.unmodifiableMap(fields);
+        }
     }
 
     record Field(Type type, boolean optional) {
@@ -54,6 +73,7 @@ sealed interface Type {
         Type bound;
     }
 
+    /** What the type is, through any {@link Var} that is known by now. */
     static Type prune(Type t) {
         while (t instanceof Var v && v.bound != null) t = v.bound;
         return t;

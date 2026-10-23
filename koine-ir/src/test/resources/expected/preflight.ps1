@@ -3,16 +3,17 @@
   Everything before publishing: builds the stack, starts every application, checks the notices and versions, and generates the installers without publishing them.
 
 .DESCRIPTION
-  Nothing is uploaded, committed or pushed. Stops at the first failing step. It builds and starts the Windows applications, so it is for Windows only.
+  Nothing is uploaded, committed or pushed. Stops at the first failing step. It builds and starts the Windows
+  applications, so it is for Windows only.
 
 .PARAMETER skipBuild
-  Use the exes already in each application's target directory.
+
 
 .PARAMETER seconds
-  How long each application must stay up.
+
 
 .PARAMETER buildOnly
-  Stop after the notices, generating nothing.
+
 #>
 param([switch]$skipBuild, [int]$seconds = 8, [switch]$buildOnly)
 $ErrorActionPreference = 'Stop'
@@ -88,8 +89,30 @@ function Script_directory {
     return $PSScriptRoot
 }
 
-function Script_sibling([string]$name) {
-    return (Join-Path $PSScriptRoot "$name.ps1")
+function Path_parent([string]$path) {
+    return (Split-Path -Path $path -Parent)
+}
+
+function Path_join([string[]]$parts) {
+    $joined = $parts[0]
+    for ($i = 1; $i -lt $parts.Count; $i++) { $joined = Join-Path $joined $parts[$i] }
+    return $joined
+}
+
+function Dir_create([string]$path) {
+    $null = New-Item -ItemType Directory -Force -Path $path
+}
+
+function Json_read([string]$path) {
+    return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json)
+}
+
+function Path_full([string]$path) {
+    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
+}
+
+function Console_heading([string]$text) {
+    Write-Host "`n== $text" -ForegroundColor Cyan
 }
 
 function Script_currentStep {
@@ -100,51 +123,25 @@ function Script_setStep([string]$name) {
     $script:KoineStep = $name
 }
 
-function Path_join([string[]]$parts) {
-    $joined = $parts[0]
-    for ($i = 1; $i -lt $parts.Count; $i++) { $joined = Join-Path $joined $parts[$i] }
-    return $joined
-}
-
-function Path_parent([string]$path) {
-    return (Split-Path -Path $path -Parent)
-}
-
-function Path_name([string]$path) {
-    return (Split-Path -Path $path -Leaf)
-}
-
-function Path_full([string]$path) {
-    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
-}
-
-function Dir_create([string]$path) {
-    $null = New-Item -ItemType Directory -Force -Path $path
-}
-
-function Dir_push([string]$path) {
-    Push-Location -LiteralPath $path
-}
-
-function Dir_pop {
-    Pop-Location
+function String_endsWith([string]$text, [string]$suffix) {
+    return $text.EndsWith($suffix, [System.StringComparison]::Ordinal)
 }
 
 function File_exists([string]$path) {
     return (Test-Path -LiteralPath $path)
 }
 
-function File_lines([string]$path) {
-    return @(Get-Content -LiteralPath $path)
-}
-
-function Json_read([string]$path) {
-    return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json)
+function Dir_push([string]$path) {
+    Push-Location -LiteralPath $path
 }
 
 function Process_start([string]$exe, [string]$log) {
     $p = Start-Process -FilePath $exe -WorkingDirectory (Get-Location).Path -PassThru -NoNewWindow -RedirectStandardOutput $log -RedirectStandardError "$log.err"
     return [pscustomobject]@{ id = [long]$p.Id; log = $log }
+}
+
+function Clock_sleep([long]$seconds) {
+    Start-Sleep -Seconds $seconds
 }
 
 function Process_running($process) {
@@ -155,24 +152,36 @@ function Process_stop($process) {
     Stop-Process -Id $process.id -Force -ErrorAction SilentlyContinue
 }
 
-function Clock_sleep([long]$seconds) {
-    Start-Sleep -Seconds $seconds
+function Number_text([long]$number) {
+    return [string]$number
 }
 
-function Console_heading([string]$text) {
-    Write-Host "`n== $text" -ForegroundColor Cyan
-}
-
-function Console_success([string]$message) {
-    Write-Host $message -ForegroundColor Green
-}
-
-function Console_warn([string]$message) {
-    Write-Host $message -ForegroundColor Yellow
+function Dir_pop {
+    Pop-Location
 }
 
 function Console_error([string]$message) {
     Write-Host $message -ForegroundColor Red
+}
+
+function File_lines([string]$path) {
+    return @(Get-Content -LiteralPath $path)
+}
+
+function String_words([string]$text) {
+    return @(-split $text)
+}
+
+function String_take([string]$text, [long]$count) {
+    return $text.Substring(0, [Math]::Min($count, $text.Length))
+}
+
+function Path_name([string]$path) {
+    return (Split-Path -Path $path -Leaf)
+}
+
+function Console_warn([string]$message) {
+    Write-Host $message -ForegroundColor Yellow
 }
 
 function Console_interactive {
@@ -183,6 +192,10 @@ function Console_pause([string]$message) {
     $null = Read-Host $message
 }
 
+function List_join([string[]]$items, [string]$separator) {
+    return ($items -join $separator)
+}
+
 function Home_directory {
     return $HOME
 }
@@ -191,24 +204,12 @@ function String_empty {
     return ''
 }
 
-function String_endsWith([string]$text, [string]$suffix) {
-    return $text.EndsWith($suffix, [System.StringComparison]::Ordinal)
+function Console_success([string]$message) {
+    Write-Host $message -ForegroundColor Green
 }
 
-function String_take([string]$text, [long]$count) {
-    return $text.Substring(0, [Math]::Min($count, $text.Length))
-}
-
-function String_words([string]$text) {
-    return @(-split $text)
-}
-
-function Number_text([long]$number) {
-    return [string]$number
-}
-
-function List_join([string[]]$items, [string]$separator) {
-    return ($items -join $separator)
+function Script_sibling([string]$name) {
+    return (Join-Path $PSScriptRoot "$name.ps1")
 }
 
 function Python_find {
@@ -261,10 +262,10 @@ $configs = @()
 $suite = koine_as_Suite (Json_read (Path_join @($dist, 'installer-suite.json')))
 foreach ($member in $suite.members) { $configs += (Path_full (Path_join @($dist, $member.config))) }
 if (-not $skipBuild) {
-    Console_heading 'Build'
-    $outerStep = Script_currentStep
-    Script_setStep 'Build'
     try {
+        Console_heading 'Build'
+        $outer = Script_currentStep
+        Script_setStep 'Build'
         # The output is checked for FAILED as well as the exit status, so a failure can never pass as a build.
         $buildCmd = Path_join @($dist, 'build.cmd')
         $failed = $false
@@ -272,12 +273,12 @@ if (-not $skipBuild) {
         $status = $LASTEXITCODE
         if ($status -ne 0) { koine_fail "$buildCmd exited with $status" }
         if ($failed) { koine_fail 'The build printed FAILED; see logs/' }
-    } finally { Script_setStep $outerStep }
+    } finally { Script_setStep $outer }
 }
-Console_heading 'Start'
-$outerStep = Script_currentStep
-Script_setStep 'Start'
 try {
+    Console_heading 'Start'
+    $outer = Script_currentStep
+    Script_setStep 'Start'
     $dead = @()
     foreach ($config in $configs) {
         $app = koine_as_App (Json_read $config)
@@ -307,14 +308,14 @@ try {
         foreach ($problem in $dead) { Console_error "  $problem" }
         koine_fail 'An application does not start'
     }
-} finally { Script_setStep $outerStep }
+} finally { Script_setStep $outer }
 
-# The Linux binaries are built in the Linux VM by build.sh, which writes logs/linux/BUILD.txt: the commit of
-# every checkout it built. They are fit to publish only while every one of those is still checked out.
-Console_heading 'Linux'
-$outerStep = Script_currentStep
-Script_setStep 'Linux'
+# The Linux binaries are built in the Linux VM by build.sh, which writes logs/linux/BUILD.txt: the commit of every
+# checkout it built. They are fit to publish only while every one of those is still checked out.
 try {
+    Console_heading 'Linux'
+    $outer = Script_currentStep
+    Script_setStep 'Linux'
     $linuxApps = @()
     foreach ($config in $configs) {
         $app = koine_as_App (Json_read $config)
@@ -333,23 +334,23 @@ try {
         }
         Write-Host "  built in the VM from these sources: $(List_join $linuxApps ', ')"
     }
-} finally { Script_setStep $outerStep }
-Console_heading 'Notices'
-$outerStep = Script_currentStep
-Script_setStep 'Notices'
+} finally { Script_setStep $outer }
 try {
+    Console_heading 'Notices'
+    $outer = Script_currentStep
+    Script_setStep 'Notices'
     $python = Python_find
     if ([string]::IsNullOrEmpty($python)) { koine_fail 'No Python found (python, py, or anaconda3)' }
     $notices = Path_join @($dist, 'notices', 'notices.py')
     if (-not (Test-Succeeds $python @((ConvertTo-NativeArgument $notices), '--check'))) {
         koine_fail 'The notices are out of date'
     }
-} finally { Script_setStep $outerStep }
+} finally { Script_setStep $outer }
 if ($buildOnly) { Console_success 'Built, started and checked.'; exit 0 }
-Console_heading 'Versions'
-$outerStep = Script_currentStep
-Script_setStep 'Versions'
 try {
+    Console_heading 'Versions'
+    $outer = Script_currentStep
+    Script_setStep 'Versions'
     foreach ($config in $configs) {
         $app = koine_as_App (Json_read $config)
         $manifest = Path_join @($dist, 'apps', $app.id, 'manifest.json')
@@ -363,22 +364,22 @@ try {
             Write-Host "  $($app.name) $($app.version) (published: $latest)"
         }
     }
-} finally { Script_setStep $outerStep }
-Console_heading 'Generate'
-$outerStep = Script_currentStep
-Script_setStep 'Generate'
+} finally { Script_setStep $outer }
 try {
+    Console_heading 'Generate'
+    $outer = Script_currentStep
+    Script_setStep 'Generate'
     $deploy = Script_sibling 'deploy'
     if (-not (Test-Succeeds $deploy)) { koine_fail 'deploy' }
-} finally { Script_setStep $outerStep }
-Console_heading 'Diff'
-$outerStep = Script_currentStep
-Script_setStep 'Diff'
+} finally { Script_setStep $outer }
 try {
+    Console_heading 'Diff'
+    $outer = Script_currentStep
+    Script_setStep 'Diff'
     try { Dir_push $dist; git status --short } finally { Dir_pop }
     $site = Path_join @($root, 'sibarum.github.io')
     if (File_exists (Path_join @($site, '.git'))) {
         try { Dir_push $site; git status --short } finally { Dir_pop }
     }
     Console_success 'Preflight passed. Look at git diff here (and in ../sibarum.github.io), then deploy -Publish.'
-} finally { Script_setStep $outerStep }
+} finally { Script_setStep $outer }
